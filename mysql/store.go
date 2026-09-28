@@ -47,8 +47,8 @@ func (s *Store) WithTransaction(ctx context.Context, fn func(authkit.Repositorie
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted}))
 }
 
-// Users returns the account and identity repository.
-func (s *Store) Users() authkit.UserRepository { return &userRepository{db: s.db} }
+// Accounts returns the account and credential-binding repository.
+func (s *Store) Accounts() authkit.AccountRepository { return &accountRepository{db: s.db} }
 
 // Challenges returns the mailbox challenge repository.
 func (s *Store) Challenges() authkit.ChallengeRepository { return &challengeRepository{db: s.db} }

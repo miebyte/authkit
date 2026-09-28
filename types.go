@@ -11,59 +11,60 @@ const (
 	SessionTTL     = 30 * 24 * time.Hour
 	EmailRateLimit = 10
 	IPRateLimit    = 30
+	// MethodEmail identifies a mailbox credential.
+	MethodEmail = "email"
+	// MethodWechat identifies an OpenID credential.
+	MethodWechat = "wechat"
 )
 
-// User is an account. Email is empty until a WeChat-only account binds a mailbox.
-type User struct {
-	ID    string
-	Email string
+// Account is the login subject. Email is empty until a mailbox credential is bound.
+// Username is empty until assigned.
+type Account struct {
+	ID       string
+	Username string
+	Email    string
 }
 
-// Challenge stores a code digest and host-owned, non-secret registration reference.
+// Challenge stores a code digest.
 type Challenge struct {
-	Email           string
-	Hash            string
-	RegistrationRef string
-	Expires         time.Time
-	Sent            time.Time
-	Attempts        int
-	Ready           bool
+	Email    string
+	Hash     string
+	Expires  time.Time
+	Sent     time.Time
+	Attempts int
+	Ready    bool
 }
 
 // Session stores only the digest of an application credential.
 type Session struct {
-	Hash    string
-	UserID  string
-	Expires time.Time
+	Hash      string
+	AccountID string
+	Expires   time.Time
 }
 
-// WechatIdentity is a server-verified identity scoped to one WeChat application.
-// Never populate it from an untrusted client's OpenID.
+// WechatIdentity is a server-verified OpenID. AppID names the application that
+// performed the exchange and is not stored; OpenID is the unique credential.
 type WechatIdentity struct {
 	AppID  string
 	OpenID string
 }
 
-// SendCodeInput carries a non-secret reference (for example an invitation digest).
-// The reference is persisted verbatim and interpreted only by the host policy.
+// SendCodeInput identifies the mailbox and the client address used for rate limits.
 type SendCodeInput struct {
-	Email           string
-	IP              string
-	RegistrationRef string
+	Email string
+	IP    string
 }
 
-// EmailLoginInput optionally replaces the reference saved when the code was sent.
+// EmailLoginInput proves a mailbox with a verification code.
 type EmailLoginInput struct {
-	Email           string
-	Code            string
-	RegistrationRef string
+	Email string
+	Code  string
 }
 
 // WechatLoginInput optionally proves a mailbox before an identity is registered.
 type WechatLoginInput struct {
-	Email           string
-	EmailCode       string
-	RegistrationRef string
+	Email     string
+	EmailCode string
 }
 
 // BindEmailInput proves an unused mailbox for an authenticated WeChat account.
@@ -75,14 +76,13 @@ type BindEmailInput struct {
 // Registration is passed to the policy only when a new account would be created.
 // The policy may consume host-owned admission data within the enclosing transaction.
 type Registration struct {
-	User      User
-	Method    string
-	Reference string
+	Account Account
+	Method  string
 }
 
 // LoginResult contains a plaintext token to deliver only after transaction commit.
 type LoginResult struct {
-	User    User
+	Account Account
 	Token   string
 	Expires time.Time
 	Created bool

@@ -57,7 +57,7 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	// MySQL persists microseconds; compare issuance time after the storage round trip.
 	now := s.now().UTC().Truncate(time.Microsecond)
 	challenge := &Challenge{
-		Email: email, Hash: digest(email + code), RegistrationRef: input.RegistrationRef,
+		Email: email, Hash: digest(email + code),
 		Sent: now, Expires: now.Add(CodeTTL),
 	}
 	err = s.store.WithTransaction(ctx, func(repos Repositories) error {
@@ -98,10 +98,18 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 
 // LoginEmail verifies a mailbox and logs in or creates an admitted account.
 func (s *Service) LoginEmail(ctx context.Context, input EmailLoginInput) (*LoginResult, error) {
-	return s.runLogin(
-		ctx,
-		func(tx *Transaction) (Outcome, error) { return tx.LoginEmail(ctx, input) },
-	)
+	login, err := emailCodeLogin(input)
+	if err != nil {
+		return nil, err
+	}
+	return s.loginCode(ctx, login)
+}
+
+// loginCode verifies one code target and logs in or creates an admitted account.
+func (s *Service) loginCode(ctx context.Context, input codeLogin) (*LoginResult, error) {
+	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
+		return tx.loginCode(ctx, input)
+	})
 }
 
 // ExchangeWechat verifies a provider code without opening a database transaction.
@@ -155,7 +163,7 @@ func (s *Service) BindEmail(
 }
 
 // Authenticate resolves a live application token. It does not authorize host resources.
-func (s *Service) Authenticate(ctx context.Context, token string) (*User, error) {
+func (s *Service) Authenticate(ctx context.Context, token string) (*Account, error) {
 	return authenticate(ctx, s.store, token, s.now().UTC())
 }
 

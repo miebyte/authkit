@@ -6,7 +6,7 @@ import (
 	"database/sql"
 
 	"github.com/miebyte/authkit"
-	"github.com/miebyte/authkit/mysql"
+	authmysql "github.com/miebyte/authkit/mysql"
 	"gorm.io/gorm"
 )
 
@@ -15,7 +15,7 @@ type Hooks interface {
 	// Authorize may consume an invitation; it is called only for new accounts.
 	Authorize(context.Context, *gorm.DB, authkit.Registration) error
 	// AfterLogin validates business access and applies writes such as joining a group.
-	AfterLogin(context.Context, *gorm.DB, authkit.User) error
+	AfterLogin(context.Context, *gorm.DB, authkit.Account) error
 }
 
 // LoginEmail commits account/session and host writes together, while preserving
@@ -39,7 +39,7 @@ func LoginEmail(
 		if err != nil || outcome.Rejected != nil {
 			return err
 		}
-		return hooks.AfterLogin(ctx, tx, outcome.Login.User)
+		return hooks.AfterLogin(ctx, tx, outcome.Login.Account)
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func LoginWechat(
 		if err != nil || outcome.Rejected != nil {
 			return err
 		}
-		return hooks.AfterLogin(ctx, tx, outcome.Login.User)
+		return hooks.AfterLogin(ctx, tx, outcome.Login.Account)
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err

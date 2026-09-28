@@ -11,7 +11,7 @@
 | 功能 | 行为 |
 | --- | --- |
 | 邮箱验证码 | 邮箱规范化、发码限流、邮件投递后激活验证码、验证并登录或注册 |
-| 微信小程序登录 | 服务端用 `wx.login` code 调用 `code2Session`，按 `AppID + OpenID` 识别账号 |
+| 微信小程序登录 | 服务端用 `wx.login` code 调用 `code2Session`，按 OpenID 识别账号 |
 | 账号绑定 | 首次微信登录可凭邮箱验证码复用已有邮箱账号；微信账号可绑定尚未被占用的邮箱 |
 | 注册准入 | 创建新账号前调用宿主策略，可在同一事务内验证或消费邀请等业务数据 |
 | 会话 | 创建、认证、退出单个会话；数据库仅保存 Token 摘要 |
@@ -56,7 +56,7 @@ func newAuthService(
 }
 ```
 
-`sender` 必须实现 `SendCode(ctx context.Context, email, code string) error`，由宿主决定邮件内容和供应商。`policy` 实现 `Authorize(ctx context.Context, registration authkit.Registration) error`；仅创建新账号时调用。`Registration` 包含新账号 `User`、`Method`（`"email"` 或 `"wechat"`）及 `Reference`。传入 `nil` 会拒绝新注册（`ErrRegistrationDenied`），已有账号仍可登录。若宿主确实允许开放注册，可显式传入返回 `nil` 的 `authkit.RegistrationPolicyFunc`。不启用微信时，将 `exchanger` 设为 `nil`。
+`sender` 必须实现 `SendCode(ctx context.Context, email, code string) error`，由宿主决定邮件内容和供应商。`policy` 实现 `Authorize(ctx context.Context, registration authkit.Registration) error`；仅创建新账号时调用。`Registration` 包含新账号 `Account` 和 `Method`（`"email"` 或 `"wechat"`）。传入 `nil` 会拒绝新注册（`ErrRegistrationDenied`），已有账号仍可登录。若宿主确实允许开放注册，可显式传入返回 `nil` 的 `authkit.RegistrationPolicyFunc`。不启用微信时，将 `exchanger` 设为 `nil`。
 
 ### 邮箱登录与会话
 
@@ -77,7 +77,7 @@ user, authErr := service.Authenticate(ctx, tokenFromRequest)
 logoutErr := service.Logout(ctx, tokenFromRequest)
 ```
 
-`SendCodeInput.IP` 由宿主根据可信代理配置取得；空值会让这类请求共用同一个 IP 限流桶。`LoginResult` 包含 `User`、明文 `Token`、`Expires` 和 `Created`。账号 ID 和 Token 均为 256 位随机值，编码成 64 个十六进制字符。Token 只在创建或轮换会话时返回；`Logout` 仅撤销传入的会话，重复退出可安全重试。
+`SendCodeInput.IP` 由宿主根据可信代理配置取得；空值会让这类请求共用同一个 IP 限流桶。`LoginResult` 包含 `Account`、明文 `Token`、`Expires` 和 `Created`。账号 ID 和 Token 均为 256 位随机值，编码成 64 个十六进制字符。Token 只在创建或轮换会话时返回；`Logout` 仅撤销传入的会话，重复退出可安全重试。
 
 ### 微信登录与绑定邮箱
 
@@ -96,18 +96,14 @@ login, err := service.BindEmail(ctx, currentToken, authkit.BindEmailInput{
 })
 ```
 
-只有拥有微信身份的账号可以调用 `BindEmail`，已绑定的邮箱不可替换。`BindEmail` 成功后账号 ID 不变，返回新 Token，原 `currentToken` 失效；其他设备的会话保留。尚未绑定邮箱的微信账号，其 `User.Email` 为空字符串。不要把客户端提供的 OpenID 当作已验证身份；需要在宿主事务中登录时，先调用 `service.ExchangeWechat(ctx, wxCode)`。
-
-### 注册引用
-
-`SendCodeInput.RegistrationRef` 可保存宿主的非秘密引用，例如邀请令牌摘要或审批记录 ID。登录时若显式传入非空 `RegistrationRef`，它优先于发码时保存的值。模块只负责传递引用；宿主策略必须在创建账号时重新校验。不要在该字段保存原始邀请密钥，并由宿主限制外部输入长度。
+只有拥有微信身份的账号可以调用 `BindEmail`，已绑定的邮箱不可替换。`BindEmail` 成功后账号 ID 不变，返回新 Token，原 `currentToken` 失效；其他设备的会话保留。尚未绑定邮箱的微信账号，其 `Account.Email` 为空字符串。不要把客户端提供的 OpenID 当作已验证身份；需要在宿主事务中登录时，先调用 `service.ExchangeWechat(ctx, wxCode)`。
 
 ## 验证码、身份与错误
 
 - 邮箱会去除首尾空白并转小写。验证码是六位数字，有效期 10 分钟；同一邮箱只保留当前验证码，最多允许 5 次错误尝试。
 - 60 秒内不能向同一邮箱重发。自首次请求起的固定一小时窗口内，每邮箱最多发送 10 次、每 IP 最多 30 次。
 - 验证码先保存为不可用状态；邮件发送成功后才激活。投递失败的验证码不能登录，但发码次数与重发冷却仍保留。
-- 微信身份按 AppID 隔离，OpenID 在入库前取摘要；不使用 UnionID 合并账号，也不保存微信 `session_key`。
+- 微信只把 OpenID 当作登录凭证，入库前取摘要，不保存 AppID、UnionID 或 `session_key`。同一个 OpenID 只能绑定一个账号。
 - 会话有效期为 30 天，不自动续期；过期会话不能认证。过期数据的清理由宿主安排。
 
 错误可用 `errors.Is` 匹配。常见错误包括 `ErrInvalidEmail` / `ErrInvalidInput`、`ErrResendTooSoon` / `ErrTooManyRequests`、`ErrChallengeInvalid` / `ErrChallengeMismatch`、`ErrRegistrationDenied`、`ErrUnauthorized`，以及微信和绑定相关的 `ErrWechatCode`、`ErrWechatLogin`、`ErrEmailAccountConflict` 等。错误全集见 [`errors.go`](errors.go)。宿主负责把它们映射到自己的 HTTP 响应。
@@ -126,7 +122,7 @@ login, err := service.BindEmail(ctx, currentToken, authkit.BindEmailInput{
 
 ## 数据表与开发
 
-默认 Schema 包含 `auth_users`、`auth_wechat_accounts`、`auth_challenges`、`auth_rates`、`auth_sessions`。模型位于 [`mysql/models`](mysql/models)，宿主通过 `authmysql.Models()` 显式迁移。自定义存储除了实现 [`ports.go`](ports.go) 中的接口，还需满足其锁、唯一性、零值写入及事务语义。
+默认 Schema 包含 `auth_accounts`、`auth_bindings`、`auth_challenges`、`auth_rates`、`auth_sessions`。账号保存 ID 和可选的 `username`。邮箱和微信 OpenID 都记在 `auth_bindings` 里，用 `method` 区分。模型位于 [`mysql/models`](mysql/models)，宿主通过 `authmysql.Models()` 显式迁移。自定义存储除了实现 [`ports.go`](ports.go) 中的接口，还需满足其锁、唯一性、零值写入及事务语义。
 
 ```sh
 make check        # go test ./... 和 go vet ./...

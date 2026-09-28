@@ -101,18 +101,18 @@ func TestEmailLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Created || result.User.Email != "alice@example.com" || result.User.ID == "" ||
+	if !result.Created || result.Account.Email != "alice@example.com" || result.Account.ID == "" ||
 		result.Token == "" ||
 		!result.Expires.Equal(f.now.Add(SessionTTL)) {
 		t.Fatalf("unexpected login result: %#v", result)
 	}
 	for digest, session := range f.store.state.sessions {
-		if digest == result.Token || digest == "" || session.UserID != result.User.ID {
+		if digest == result.Token || digest == "" || session.AccountID != result.Account.ID {
 			t.Fatal("only token digests may be persisted")
 		}
 	}
 	user, err := f.service.Authenticate(ctx, result.Token)
-	if err != nil || user.ID != result.User.ID {
+	if err != nil || user.ID != result.Account.ID || user.Username != "" {
 		t.Fatalf("authenticate = %v, %v", user, err)
 	}
 	_, err = f.service.LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: code})
@@ -138,7 +138,7 @@ func TestChallengeExpiryAndAttempts(t *testing.T) {
 			EmailLoginInput{Email: "alice@example.com", Code: code},
 		)
 		requireError(t, err, ErrChallengeInvalid)
-		if len(f.store.state.users) != 0 {
+		if len(f.store.state.accounts) != 0 {
 			t.Fatal("expired proof created an account")
 		}
 	})
@@ -160,7 +160,7 @@ func TestChallengeExpiryAndAttempts(t *testing.T) {
 			EmailLoginInput{Email: "alice@example.com", Code: code},
 		)
 		requireError(t, err, ErrChallengeInvalid)
-		if len(f.store.state.users) != 0 {
+		if len(f.store.state.accounts) != 0 {
 			t.Fatal("exhausted proof created an account")
 		}
 	})
@@ -269,7 +269,6 @@ func TestSendFailureAndReplacement(t *testing.T) {
 			newer := f.store.state.challenges["alice@example.com"]
 			newer.Sent = newer.Sent.Add(ResendInterval)
 			newer.Expires = newer.Sent.Add(CodeTTL)
-			newer.RegistrationRef = "newer-host-reference"
 			f.store.state.challenges[newer.Email] = newer
 		}
 		err := f.service.SendCode(ctx, SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"})
@@ -285,7 +284,7 @@ func TestSendFailureAndReplacement(t *testing.T) {
 	})
 }
 
-// TestRegistrationAdmission checks default denial, rollback and explicit reference precedence.
+// TestRegistrationAdmission checks default denial, rollback and the account shown to the policy.
 func TestRegistrationAdmission(t *testing.T) {
 	t.Run("default denial and existing account", func(t *testing.T) {
 		f := newFixture(t, nil)
@@ -295,63 +294,49 @@ func TestRegistrationAdmission(t *testing.T) {
 			EmailLoginInput{Email: "alice@example.com", Code: code},
 		)
 		requireError(t, err, ErrRegistrationDenied)
-		if len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
+		if len(f.store.state.accounts) != 0 || len(f.store.state.sessions) != 0 ||
 			!f.store.state.challenges["alice@example.com"].Ready {
 			t.Fatal("admission rejection leaked writes or consumed proof")
 		}
-		f.store.state.users["existing"] = User{ID: "existing", Email: "alice@example.com"}
+		f.store.state.accounts["existing"] = Account{ID: "existing", Email: "alice@example.com"}
+		f.store.state.bindings[bindingKey(MethodEmail, "alice@example.com")] = "existing"
 		result, err := f.service.LoginEmail(
 			context.Background(),
 			EmailLoginInput{Email: "alice@example.com", Code: code},
 		)
-		if err != nil || result.User.ID != "existing" || result.Created {
+		if err != nil || result.Account.ID != "existing" || result.Created {
 			t.Fatalf("existing login = %v, %v", result, err)
 		}
 	})
-	for _, override := range []string{"", "host-login-reference"} {
-		t.Run("reference:"+override, func(t *testing.T) {
-			var seen Registration
-			f := newFixture(
-				t,
-				RegistrationPolicyFunc(
-					func(_ context.Context, registration Registration) error { seen = registration; return errPolicyFailure },
-				),
-			)
-			err := f.service.SendCode(
-				context.Background(),
-				SendCodeInput{
-					Email:           "alice@example.com",
-					IP:              "192.0.2.1",
-					RegistrationRef: "host-send-reference",
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = f.service.LoginEmail(
-				context.Background(),
-				EmailLoginInput{
-					Email:           "alice@example.com",
-					Code:            f.mail.code,
-					RegistrationRef: override,
-				},
-			)
-			requireError(t, err, errPolicyFailure)
-			want := override
-			if want == "" {
-				want = "host-send-reference"
-			}
-			if seen.Reference != want || seen.User.ID == "" ||
-				seen.User.Email != "alice@example.com" ||
-				seen.Method == "" {
-				t.Fatalf("policy received %#v", seen)
-			}
-			if len(f.store.state.users) != 0 ||
-				!f.store.state.challenges["alice@example.com"].Ready {
-				t.Fatal("policy failure did not roll back")
-			}
-		})
-	}
+	t.Run("policy", func(t *testing.T) {
+		var seen Registration
+		f := newFixture(
+			t,
+			RegistrationPolicyFunc(
+				func(_ context.Context, registration Registration) error { seen = registration; return errPolicyFailure },
+			),
+		)
+		err := f.service.SendCode(
+			context.Background(),
+			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.service.LoginEmail(
+			context.Background(),
+			EmailLoginInput{Email: "alice@example.com", Code: f.mail.code},
+		)
+		requireError(t, err, errPolicyFailure)
+		if seen.Account.ID == "" || seen.Account.Email != "alice@example.com" ||
+			seen.Method != MethodEmail {
+			t.Fatalf("policy received %#v", seen)
+		}
+		if len(f.store.state.accounts) != 0 ||
+			!f.store.state.challenges["alice@example.com"].Ready {
+			t.Fatal("policy failure did not roll back")
+		}
+	})
 }
 
 // TestWechatLogin verifies new and returning identity behavior and exchange ordering.
@@ -361,30 +346,30 @@ func TestWechatLogin(t *testing.T) {
 	first, err := f.service.LoginWechat(
 		ctx,
 		"one-time-provider-code",
-		WechatLoginInput{RegistrationRef: "host-reference"},
+		WechatLoginInput{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Created || first.User.Email != "" || f.wechat.calledInsideTransaction {
+	if !first.Created || first.Account.Email != "" || f.wechat.calledInsideTransaction {
 		t.Fatalf("unexpected first login: %#v", first)
 	}
 	second, err := f.service.LoginWechat(ctx, "next-provider-code", WechatLoginInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Created || first.User.ID != second.User.ID || first.Token == second.Token ||
-		len(f.store.state.users) != 1 {
+	if second.Created || first.Account.ID != second.Account.ID || first.Token == second.Token ||
+		len(f.store.state.accounts) != 1 {
 		t.Fatal("returning WeChat identity must reuse the account with a fresh session")
 	}
-	for key := range f.store.state.wechat {
+	for key := range f.store.state.bindings {
 		if strings.Contains(key, f.wechat.identity.OpenID) {
 			t.Fatal("raw OpenID was persisted")
 		}
 	}
 	f.wechat.identity.OpenID = "another-verified-open-id"
 	third, err := f.service.LoginWechat(ctx, "another-code", WechatLoginInput{})
-	if err != nil || third.User.ID == first.User.ID {
+	if err != nil || third.Account.ID == first.Account.ID {
 		t.Fatalf("second WeChat-only account = %v, %v", third, err)
 	}
 }
@@ -404,7 +389,8 @@ func TestWechatEmailProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Created || result.User.ID != account.User.ID || len(f.store.state.users) != 1 {
+	if result.Created || result.Account.ID != account.Account.ID ||
+		len(f.store.state.accounts) != 1 {
 		t.Fatal("proved email did not reuse its existing account")
 	}
 	f.wechat.identity.OpenID = "different-open-id"
@@ -416,7 +402,7 @@ func TestWechatEmailProof(t *testing.T) {
 		WechatLoginInput{Email: "alice@example.com", EmailCode: code},
 	)
 	requireError(t, err, ErrWechatBound)
-	if len(f.store.state.users) != 1 || !f.store.state.challenges["alice@example.com"].Ready {
+	if len(f.store.state.accounts) != 1 || !f.store.state.challenges["alice@example.com"].Ready {
 		t.Fatal("binding conflict leaked writes")
 	}
 }
@@ -444,8 +430,8 @@ func TestWechatDoesNotMergeAccounts(t *testing.T) {
 		WechatLoginInput{Email: "alice@example.com", EmailCode: code},
 	)
 	requireError(t, err, ErrEmailAccountConflict)
-	if len(f.store.state.users) != 2 || f.store.state.users[wxUser.User.ID].Email != "" ||
-		f.store.state.users[emailUser.User.ID].Email == "" {
+	if len(f.store.state.accounts) != 2 || f.store.state.accounts[wxUser.Account.ID].Email != "" ||
+		f.store.state.accounts[emailUser.Account.ID].Email == "" {
 		t.Fatal("binding merged independent accounts")
 	}
 	if _, err := f.service.Authenticate(ctx, wxUser.Token); err != nil {
@@ -474,8 +460,8 @@ func TestBindEmailRotatesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound.Created || bound.User.ID != initial.User.ID ||
-		bound.User.Email != "alice@example.com" ||
+	if bound.Created || bound.Account.ID != initial.Account.ID ||
+		bound.Account.Email != "alice@example.com" ||
 		bound.Token == initial.Token {
 		t.Fatalf("unexpected bind result: %#v", bound)
 	}
@@ -511,12 +497,12 @@ func TestWechatAdmissionAndProviderFailure(t *testing.T) {
 		f := newFixture(t, nil)
 		_, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
 		requireError(t, err, ErrRegistrationDenied)
-		if len(f.store.state.users) != 0 || len(f.store.state.wechat) != 0 ||
+		if len(f.store.state.accounts) != 0 || len(f.store.state.bindings) != 0 ||
 			len(f.store.state.sessions) != 0 {
 			t.Fatal("denied WeChat registration persisted identity state")
 		}
 	})
-	t.Run("saved reference", func(t *testing.T) {
+	t.Run("admission", func(t *testing.T) {
 		var seen Registration
 		f := newFixture(
 			t,
@@ -526,11 +512,7 @@ func TestWechatAdmissionAndProviderFailure(t *testing.T) {
 		)
 		if err := f.service.SendCode(
 			ctx,
-			SendCodeInput{
-				Email:           "alice@example.com",
-				IP:              "192.0.2.1",
-				RegistrationRef: "host-mail-reference",
-			},
+			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -542,8 +524,8 @@ func TestWechatAdmissionAndProviderFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if seen.Reference != "host-mail-reference" || seen.User.ID != result.User.ID ||
-			seen.User.Email != "alice@example.com" ||
+		if seen.Account.ID != result.Account.ID ||
+			seen.Account.Email != "alice@example.com" ||
 			seen.Method != "wechat" {
 			t.Fatalf("unexpected WeChat admission: %#v", seen)
 		}
@@ -553,7 +535,7 @@ func TestWechatAdmissionAndProviderFailure(t *testing.T) {
 		f.wechat.err = ErrWechatLogin
 		_, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
 		requireError(t, err, ErrWechatLogin)
-		if len(f.store.state.users) != 0 || len(f.store.state.wechat) != 0 ||
+		if len(f.store.state.accounts) != 0 || len(f.store.state.bindings) != 0 ||
 			len(f.store.state.sessions) != 0 {
 			t.Fatal("failed provider exchange persisted identity state")
 		}
@@ -571,7 +553,7 @@ func TestTransactionPolicyOverride(t *testing.T) {
 		return err
 	})
 	requireError(t, err, ErrRegistrationDenied)
-	if len(f.store.state.users) != 0 || !f.store.state.challenges["alice@example.com"].Ready {
+	if len(f.store.state.accounts) != 0 || !f.store.state.challenges["alice@example.com"].Ready {
 		t.Fatal("transaction inherited a standalone admission policy")
 	}
 }
@@ -596,7 +578,7 @@ func TestHostTransactionRollback(t *testing.T) {
 		return hostErr
 	})
 	requireError(t, err, hostErr)
-	if issued == nil || len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
+	if issued == nil || len(f.store.state.accounts) != 0 || len(f.store.state.sessions) != 0 ||
 		!f.store.state.challenges["alice@example.com"].Ready {
 		t.Fatal("host failure did not roll back account, session and proof")
 	}
@@ -633,7 +615,7 @@ func TestHostTransactionRejected(t *testing.T) {
 	}
 	requireError(t, rejected, ErrChallengeMismatch)
 	if f.store.state.challenges["alice@example.com"].Attempts != 1 ||
-		len(f.store.state.users) != 0 {
+		len(f.store.state.accounts) != 0 {
 		t.Fatal("rejected outcome did not preserve only the failed attempt")
 	}
 }
@@ -668,7 +650,7 @@ func TestInputValidation(t *testing.T) {
 	}
 	_, err := f.service.LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: "123456"})
 	requireError(t, err, ErrChallengeInvalid)
-	if len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
+	if len(f.store.state.accounts) != 0 || len(f.store.state.sessions) != 0 ||
 		len(f.store.state.challenges) != 0 {
 		t.Fatal("invalid requests persisted identity state")
 	}
@@ -696,7 +678,7 @@ func TestUnissuedMailboxDoesNotAllocateChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireError(t, rejected, ErrChallengeInvalid)
-	if len(f.store.state.challenges) != 0 || len(f.store.state.users) != 0 ||
+	if len(f.store.state.challenges) != 0 || len(f.store.state.accounts) != 0 ||
 		len(f.store.state.sessions) != 0 {
 		t.Fatal("unissued mailbox guesses allocated durable identity state")
 	}

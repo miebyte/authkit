@@ -3,14 +3,15 @@ package authkit
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
 
 // memoryState contains the durable data used by the transactional test double.
 type memoryState struct {
-	users      map[string]User
-	wechat     map[string]string
+	accounts   map[string]Account
+	bindings   map[string]string
 	challenges map[string]Challenge
 	rates      map[string]memoryRate
 	sessions   map[string]Session
@@ -32,8 +33,8 @@ type memoryStore struct {
 // memoryRepositories binds each repository to one state snapshot.
 type memoryRepositories struct{ state *memoryState }
 
-// memoryUsers implements identity persistence against a snapshot.
-type memoryUsers struct{ state *memoryState }
+// memoryAccounts implements identity persistence against a snapshot.
+type memoryAccounts struct{ state *memoryState }
 
 // memoryChallenges implements mailbox persistence against a snapshot.
 type memoryChallenges struct{ state *memoryState }
@@ -47,8 +48,11 @@ type memorySessions struct{ state *memoryState }
 // newMemoryStore constructs empty durable state for each test.
 func newMemoryStore() *memoryStore {
 	return &memoryStore{memoryRepositories: &memoryRepositories{state: &memoryState{
-		users: map[string]User{}, wechat: map[string]string{}, challenges: map[string]Challenge{},
-		rates: map[string]memoryRate{}, sessions: map[string]Session{},
+		accounts:   map[string]Account{},
+		bindings:   map[string]string{},
+		challenges: map[string]Challenge{},
+		rates:      map[string]memoryRate{},
+		sessions:   map[string]Session{},
 	}}}
 }
 
@@ -64,7 +68,7 @@ func copyMap[K comparable, V any](input map[K]V) map[K]V {
 // clone copies all persisted values so a rolled-back transaction cannot leak writes.
 func (s *memoryState) clone() *memoryState {
 	return &memoryState{
-		users: copyMap(s.users), wechat: copyMap(s.wechat),
+		accounts: copyMap(s.accounts), bindings: copyMap(s.bindings),
 		challenges: copyMap(s.challenges), rates: copyMap(s.rates), sessions: copyMap(s.sessions),
 	}
 }
@@ -86,8 +90,8 @@ func (s *memoryStore) WithTransaction(ctx context.Context, fn func(Repositories)
 	return err
 }
 
-// Users returns identities bound to the current snapshot.
-func (r *memoryRepositories) Users() UserRepository { return memoryUsers{r.state} }
+// Accounts returns identities bound to the current snapshot.
+func (r *memoryRepositories) Accounts() AccountRepository { return memoryAccounts{r.state} }
 
 // Challenges returns mailboxes bound to the current snapshot.
 func (r *memoryRepositories) Challenges() ChallengeRepository { return memoryChallenges{r.state} }
@@ -98,50 +102,58 @@ func (r *memoryRepositories) Rates() RateRepository { return memoryRates{r.state
 // Sessions returns sessions bound to the current snapshot.
 func (r *memoryRepositories) Sessions() SessionRepository { return memorySessions{r.state} }
 
+// bindingKey identifies one credential independently of its owner.
+func bindingKey(method, identifier string) string { return method + "/" + identifier }
+
 // GetByEmail resolves an existing nonempty mailbox.
-func (r memoryUsers) GetByEmail(_ context.Context, email string) (*User, error) {
-	for _, user := range r.state.users {
-		if user.Email == email && email != "" {
-			return &user, nil
-		}
+func (r memoryAccounts) GetByEmail(ctx context.Context, email string) (*Account, error) {
+	if email == "" {
+		return nil, ErrNotFound
 	}
-	return nil, ErrNotFound
+	return r.accountForBinding(ctx, bindingKey(MethodEmail, email))
 }
 
-// GetByID resolves a persisted account.
-func (r memoryUsers) GetByID(_ context.Context, id string) (*User, error) {
-	user, ok := r.state.users[id]
+// GetByID resolves a persisted account and its mailbox projection.
+func (r memoryAccounts) GetByID(_ context.Context, id string) (*Account, error) {
+	account, ok := r.state.accounts[id]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return &user, nil
+	account.Email = r.emailOf(id)
+	return &account, nil
 }
 
-// GetByWechat resolves the identity scoped to its application.
-func (r memoryUsers) GetByWechat(ctx context.Context, appID, openIDHash string) (*User, error) {
-	return r.GetByID(ctx, r.state.wechat[appID+"/"+openIDHash])
-}
-
-// BindWechat enforces a unique identity and one WeChat identity per user/application.
-func (r memoryUsers) BindWechat(_ context.Context, appID, openIDHash, userID string) error {
-	key := appID + "/" + openIDHash
-	if current, ok := r.state.wechat[key]; ok && current != userID {
-		return ErrConflict
+// GetByWechat locks the OpenID, inserting an unbound placeholder when it is new.
+func (r memoryAccounts) GetByWechat(ctx context.Context, openIDHash string) (*Account, error) {
+	key := bindingKey(MethodWechat, openIDHash)
+	if _, ok := r.state.bindings[key]; !ok {
+		r.state.bindings[key] = ""
 	}
-	for existingKey, existingUser := range r.state.wechat {
-		if existingUser == userID && existingKey != key && len(existingKey) > len(appID) &&
-			existingKey[:len(appID)+1] == appID+"/" {
+	return r.accountForBinding(ctx, key)
+}
+
+// BindWechat assigns a locked OpenID once. One account keeps a single WeChat credential.
+func (r memoryAccounts) BindWechat(_ context.Context, openIDHash, accountID string) error {
+	key := bindingKey(MethodWechat, openIDHash)
+	if current, ok := r.state.bindings[key]; ok && current != "" && current != accountID {
+		return ErrWechatBound
+	}
+	prefix := MethodWechat + "/"
+	for existingKey, existingAccount := range r.state.bindings {
+		if strings.HasPrefix(existingKey, prefix) && existingAccount == accountID &&
+			existingKey != key {
 			return ErrWechatBound
 		}
 	}
-	r.state.wechat[key] = userID
+	r.state.bindings[key] = accountID
 	return nil
 }
 
-// HasWechat reports whether an account has any associated WeChat identity.
-func (r memoryUsers) HasWechat(_ context.Context, userID string) (bool, error) {
-	for _, id := range r.state.wechat {
-		if id == userID {
+// HasWechat reports whether an account has an OpenID binding.
+func (r memoryAccounts) HasWechat(_ context.Context, accountID string) (bool, error) {
+	prefix := MethodWechat + "/"
+	for key, id := range r.state.bindings {
+		if id == accountID && strings.HasPrefix(key, prefix) {
 			return true, nil
 		}
 	}
@@ -149,45 +161,76 @@ func (r memoryUsers) HasWechat(_ context.Context, userID string) (bool, error) {
 }
 
 // BindEmail rejects reassignment and independently owned mailboxes.
-func (r memoryUsers) BindEmail(ctx context.Context, userID, email string) error {
-	user, err := r.GetByID(ctx, userID)
+func (r memoryAccounts) BindEmail(ctx context.Context, accountID, email string) error {
+	account, err := r.GetByID(ctx, accountID)
 	if err != nil {
 		return err
 	}
-	if user.Email != "" {
+	if account.Email != "" {
 		return ErrEmailBound
 	}
 	if _, err := r.GetByEmail(ctx, email); err == nil {
 		return ErrEmailAccountConflict
 	}
-	user.Email = email
-	r.state.users[userID] = *user
+	r.state.bindings[bindingKey(MethodEmail, email)] = accountID
+	account.Email = email
+	r.state.accounts[accountID] = *account
 	return nil
 }
 
-// Create enforces unique IDs and nonempty mailboxes while permitting WeChat-only users.
-func (r memoryUsers) Create(ctx context.Context, user *User) error {
-	if _, exists := r.state.users[user.ID]; exists {
+// Create enforces unique IDs and mailboxes while permitting accounts without an email.
+func (r memoryAccounts) Create(ctx context.Context, account *Account) error {
+	if _, exists := r.state.accounts[account.ID]; exists {
 		return ErrConflict
 	}
-	if _, err := r.GetByEmail(ctx, user.Email); err == nil {
+	if _, err := r.GetByEmail(ctx, account.Email); err == nil {
 		return ErrConflict
 	}
-	r.state.users[user.ID] = *user
+	if account.Username != "" {
+		for _, existing := range r.state.accounts {
+			if existing.Username == account.Username {
+				return ErrConflict
+			}
+		}
+	}
+	r.state.accounts[account.ID] = *account
+	if account.Email != "" {
+		r.state.bindings[bindingKey(MethodEmail, account.Email)] = account.ID
+	}
 	return nil
 }
 
 // GetBySessionToken only resolves unexpired sessions.
-func (r memoryUsers) GetBySessionToken(
+func (r memoryAccounts) GetBySessionToken(
 	ctx context.Context,
 	hash string,
 	now time.Time,
-) (*User, error) {
+) (*Account, error) {
 	session, exists := r.state.sessions[hash]
 	if !exists || !now.Before(session.Expires) {
 		return nil, ErrNotFound
 	}
-	return r.GetByID(ctx, session.UserID)
+	return r.GetByID(ctx, session.AccountID)
+}
+
+// accountForBinding resolves the owner of a credential, or reports it missing.
+func (r memoryAccounts) accountForBinding(ctx context.Context, key string) (*Account, error) {
+	accountID, ok := r.state.bindings[key]
+	if !ok || accountID == "" {
+		return nil, ErrNotFound
+	}
+	return r.GetByID(ctx, accountID)
+}
+
+// emailOf returns the mailbox bound to an account.
+func (r memoryAccounts) emailOf(accountID string) string {
+	prefix := MethodEmail + "/"
+	for key, id := range r.state.bindings {
+		if id == accountID && strings.HasPrefix(key, prefix) {
+			return strings.TrimPrefix(key, prefix)
+		}
+	}
+	return ""
 }
 
 // Get allocates a mailbox placeholder while serializing its first issuance.

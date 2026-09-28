@@ -15,7 +15,7 @@ import (
 
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/miebyte/authkit"
-	"github.com/miebyte/authkit/mysql"
+	authmysql "github.com/miebyte/authkit/mysql"
 	"github.com/miebyte/authkit/mysql/models"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -71,7 +71,7 @@ func testDatabase(t *testing.T) (*gorm.DB, *authmysql.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if db.Migrator().HasTable(&models.User{}) {
+	if db.Migrator().HasTable(&models.Account{}) {
 		t.Fatal("NewStore unexpectedly migrated the schema")
 	}
 	if err = db.AutoMigrate(authmysql.Models()...); err != nil {
@@ -233,9 +233,9 @@ func TestConcurrentWechatRegistration(t *testing.T) {
 	tokens := map[string]bool{}
 	for result := range results {
 		if userID == "" {
-			userID = result.User.ID
+			userID = result.Account.ID
 		}
-		if result.User.ID != userID {
+		if result.Account.ID != userID {
 			t.Error("concurrent registration created separate accounts")
 		}
 		if result.Created {
@@ -252,7 +252,7 @@ func TestConcurrentWechatRegistration(t *testing.T) {
 	if len(tokens) != workers || created != 1 || authorized.Load() != 1 {
 		t.Fatalf("sessions=%d created=%d authorized=%d", len(tokens), created, authorized.Load())
 	}
-	if countRows(t, db, &models.User{}) != 1 || countRows(t, db, &models.WechatAccount{}) != 1 ||
+	if countRows(t, db, &models.Account{}) != 1 || countRows(t, db, &models.Binding{}) != 1 ||
 		countRows(t, db, &models.Session{}) != workers {
 		t.Fatal("unexpected persisted identity/session counts")
 	}
@@ -273,64 +273,52 @@ func TestUniqueBindings(t *testing.T) {
 	ctx := context.Background()
 	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
 		for _, id := range []string{"one", "two"} {
-			if err := r.Users().Create(ctx, &authkit.User{ID: id}); err != nil {
+			if err := r.Accounts().Create(ctx, &authkit.Account{ID: id}); err != nil {
 				return err
 			}
 		}
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-one", strings.Repeat("a", 64)); !errors.Is(
+		if _, err := r.Accounts().
+			GetByWechat(ctx, strings.Repeat("a", 64)); !errors.Is(
 			err,
 			authkit.ErrNotFound,
 		) {
 			return err
 		}
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("a", 64), "one")
+		return r.Accounts().BindWechat(ctx, strings.Repeat("a", 64), "one")
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if countRows(t, db, &models.User{}) != 2 {
+	if countRows(t, db, &models.Account{}) != 2 {
 		t.Fatal("nullable email prevented separate WeChat accounts")
 	}
 	err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-one", strings.Repeat("b", 64)); !errors.Is(
+		if _, err := r.Accounts().
+			GetByWechat(ctx, strings.Repeat("b", 64)); !errors.Is(
 			err,
 			authkit.ErrNotFound,
 		) {
 			return err
 		}
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("b", 64), "one")
+		return r.Accounts().BindWechat(ctx, strings.Repeat("b", 64), "one")
 	})
 	if !errors.Is(err, authkit.ErrWechatBound) {
 		t.Fatalf("duplicate application binding: %v", err)
 	}
 	err = store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("a", 64), "two")
+		return r.Accounts().BindWechat(ctx, strings.Repeat("a", 64), "two")
 	})
 	if !errors.Is(err, authkit.ErrWechatBound) {
 		t.Fatalf("identity reassignment: %v", err)
 	}
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-two", strings.Repeat("b", 64)); !errors.Is(
-			err,
-			authkit.ErrNotFound,
-		) {
-			return err
-		}
-		return r.Users().BindWechat(ctx, "app-two", strings.Repeat("b", 64), "one")
-	}); err != nil {
-		t.Fatalf("same account in different application: %v", err)
-	}
 	if err := store.WithTransaction(
 		ctx,
-		func(r authkit.Repositories) error { return r.Users().BindEmail(ctx, "one", "unique@example.com") },
+		func(r authkit.Repositories) error { return r.Accounts().BindEmail(ctx, "one", "unique@example.com") },
 	); err != nil {
 		t.Fatal(err)
 	}
 	err = store.WithTransaction(
 		ctx,
-		func(r authkit.Repositories) error { return r.Users().BindEmail(ctx, "two", "unique@example.com") },
+		func(r authkit.Repositories) error { return r.Accounts().BindEmail(ctx, "two", "unique@example.com") },
 	)
 	if !errors.Is(err, authkit.ErrEmailAccountConflict) {
 		t.Fatalf("email uniqueness: %v", err)
@@ -358,7 +346,7 @@ func TestHostTransactionRollback(t *testing.T) {
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		policy := authkit.RegistrationPolicyFunc(
 			func(ctx context.Context, registration authkit.Registration) error {
-				return tx.WithContext(ctx).Create(&hostAdmission{ID: registration.User.ID}).Error
+				return tx.WithContext(ctx).Create(&hostAdmission{ID: registration.Account.ID}).Error
 			},
 		)
 		outcome, err := svc.InTransaction(authmysql.Bind(tx), policy).
@@ -377,7 +365,7 @@ func TestHostTransactionRollback(t *testing.T) {
 	if !errors.Is(err, failure) {
 		t.Fatalf("got %v", err)
 	}
-	for _, model := range []any{&models.User{}, &models.WechatAccount{}, &models.Session{}, &hostAdmission{}} {
+	for _, model := range []any{&models.Account{}, &models.Binding{}, &models.Session{}, &hostAdmission{}} {
 		if countRows(t, db, model) != 0 {
 			t.Fatalf("rollback left persisted %T", model)
 		}
@@ -393,7 +381,7 @@ func TestWrongCodeCommitsAttempts(t *testing.T) {
 	email := "attempts@example.com"
 	if err := svc.SendCode(
 		ctx,
-		authkit.SendCodeInput{Email: email, IP: "127.0.0.1", RegistrationRef: "host-ref:中文"},
+		authkit.SendCodeInput{Email: email, IP: "127.0.0.1"},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +414,7 @@ func TestWrongCodeCommitsAttempts(t *testing.T) {
 	if err := db.First(&challenge, "email = ?", email).Error; err != nil {
 		t.Fatal(err)
 	}
-	if challenge.Attempts != 2 || !challenge.Ready || challenge.RegistrationRef != "host-ref:中文" {
+	if challenge.Attempts != 2 || !challenge.Ready {
 		t.Fatalf("unexpected challenge: attempts=%d ready=%t", challenge.Attempts, challenge.Ready)
 	}
 	denied := newService(t, store, sender, nil)
@@ -512,31 +500,31 @@ func TestSessionExpirationAndChallengeZeroValues(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	hash := strings.Repeat("f", 64)
 	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if err := r.Users().Create(ctx, &authkit.User{ID: "expiry-user"}); err != nil {
+		if err := r.Accounts().Create(ctx, &authkit.Account{ID: "expiry-user"}); err != nil {
 			return err
 		}
 		if err := r.Sessions().
-			Create(ctx, &authkit.Session{Hash: hash, UserID: "expiry-user", Expires: now}); err != nil {
+			Create(ctx, &authkit.Session{Hash: hash, AccountID: "expiry-user", Expires: now}); err != nil {
 			return err
 		}
 		challenge, err := r.Challenges().Get(ctx, "zero@example.com")
 		if err != nil {
 			return err
 		}
-		challenge.Hash, challenge.RegistrationRef, challenge.Attempts, challenge.Ready = hash, "ref", 4, true
+		challenge.Hash, challenge.Attempts, challenge.Ready = hash, 4, true
 		if err := r.Challenges().Save(ctx, challenge); err != nil {
 			return err
 		}
-		challenge.Hash, challenge.RegistrationRef, challenge.Attempts, challenge.Ready = "", "", 0, false
+		challenge.Hash, challenge.Attempts, challenge.Ready = "", 0, false
 		return r.Challenges().Save(ctx, challenge)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Users().
+	if _, err := store.Accounts().
 		GetBySessionToken(ctx, hash, now.Add(-time.Microsecond)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Users().
+	if _, err := store.Accounts().
 		GetBySessionToken(ctx, hash, now); !errors.Is(
 		err,
 		authkit.ErrNotFound,
@@ -548,7 +536,7 @@ func TestSessionExpirationAndChallengeZeroValues(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if challenge.Hash != "" || challenge.RegistrationRef != "" || challenge.Attempts != 0 ||
+		if challenge.Hash != "" || challenge.Attempts != 0 ||
 			challenge.Ready {
 			t.Fatal("challenge failed to persist false/zero/empty values")
 		}
@@ -579,32 +567,31 @@ func TestMailboxCollationPreventsCrossAccountLogin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !login.Created || login.User.Email != email {
+		if !login.Created || login.Account.Email != email {
 			t.Fatal("mailbox resolved to an existing different account")
 		}
-		accounts = append(accounts, login.User.ID)
+		accounts = append(accounts, login.Account.ID)
 	}
-	if accounts[0] == accounts[1] || countRows(t, db, &models.User{}) != 2 ||
+	if accounts[0] == accounts[1] || countRows(t, db, &models.Account{}) != 2 ||
 		countRows(t, db, &models.Challenge{}) != 2 {
 		t.Fatal("accent-distinct inboxes shared a challenge or account")
 	}
-	// App IDs and user IDs are also exact identifiers, independent of host collation.
+	// Account IDs and OpenID digests are exact identifiers, independent of host collation.
 	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		for _, id := range []string{"CaseID", "caseid"} {
-			if err := r.Users().Create(ctx, &authkit.User{ID: id}); err != nil {
+		ids := []string{"CaseID", "caseid"}
+		hashes := []string{strings.Repeat("c", 64), strings.Repeat("C", 64)}
+		for i, id := range ids {
+			if err := r.Accounts().Create(ctx, &authkit.Account{ID: id}); err != nil {
 				return err
 			}
-		}
-		for _, app := range []string{"CaseApp", "caseapp"} {
-			if _, err := r.Users().
-				GetByWechat(ctx, app, strings.Repeat("c", 64)); !errors.Is(
+			if _, err := r.Accounts().
+				GetByWechat(ctx, hashes[i]); !errors.Is(
 				err,
 				authkit.ErrNotFound,
 			) {
 				return err
 			}
-			if err := r.Users().
-				BindWechat(ctx, app, strings.Repeat("c", 64), "CaseID"); err != nil {
+			if err := r.Accounts().BindWechat(ctx, hashes[i], id); err != nil {
 				return err
 			}
 		}
@@ -612,8 +599,14 @@ func TestMailboxCollationPreventsCrossAccountLogin(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("exact identifier columns: %v", err)
 	}
-	if countRows(t, db, &models.WechatAccount{}) != 2 {
-		t.Fatal("application IDs compared case-insensitively")
+	var wechatBindings int64
+	if err := db.Model(&models.Binding{}).
+		Where("method = ?", authkit.MethodWechat).
+		Count(&wechatBindings).Error; err != nil {
+		t.Fatal(err)
+	}
+	if wechatBindings != 2 {
+		t.Fatal("OpenID digests compared case-insensitively")
 	}
 }
 

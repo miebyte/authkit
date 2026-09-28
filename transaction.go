@@ -15,34 +15,74 @@ type Transaction struct {
 	now          func() time.Time
 }
 
+// codeLogin is one verification-code login, independent of the delivery channel.
+type codeLogin struct {
+	method string
+	target string
+	code   string
+}
+
+// emailCodeLogin normalizes a mailbox login into the shared code-login input.
+func emailCodeLogin(input EmailLoginInput) (codeLogin, error) {
+	email, err := NormalizeEmail(input.Email)
+	if err != nil {
+		return codeLogin{}, err
+	}
+	return codeLogin{method: MethodEmail, target: email, code: input.Code}, nil
+}
+
 // LoginEmail consumes valid email proof and opens a session for the admitted account.
 func (t *Transaction) LoginEmail(ctx context.Context, input EmailLoginInput) (Outcome, error) {
-	email, err := NormalizeEmail(input.Email)
+	login, err := emailCodeLogin(input)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !validEmailCode(input.Code) {
+	return t.loginCode(ctx, login)
+}
+
+// loginCode consumes valid code proof and opens a session for the admitted account.
+func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, error) {
+	if !validCode(input.code) {
 		return Outcome{}, ErrInvalidInput
 	}
 	now := t.now().UTC()
-	challenge, rejected, err := t.verifyEmail(ctx, email, input.Code, now)
+	challenge, rejected, err := t.verifyCode(ctx, input.target, input.code, now)
 	if err != nil || rejected != nil {
 		return Outcome{Rejected: rejected}, err
 	}
-	user, err := t.repos.Users().GetByEmail(ctx, email)
+	user, err := t.findCodeAccount(ctx, input)
 	created := errors.Is(err, ErrNotFound)
 	if created {
-		user, err = t.createUser(
-			ctx,
-			email,
-			"email",
-			registrationRef(input.RegistrationRef, challenge),
-		)
+		var account *Account
+		account, err = newCodeAccount(input)
+		if err == nil {
+			user, err = t.createAccount(ctx, account, input.method)
+		}
 	}
 	if err != nil {
 		return Outcome{}, err
 	}
 	return t.finishLogin(ctx, user, challenge, created, now)
+}
+
+// findCodeAccount loads the account already bound to this code target.
+func (t *Transaction) findCodeAccount(ctx context.Context, input codeLogin) (*Account, error) {
+	switch input.method {
+	case MethodEmail:
+		return t.repos.Accounts().GetByEmail(ctx, input.target)
+	default:
+		return nil, ErrInvalidInput
+	}
+}
+
+// newCodeAccount builds an unsaved account for a code channel that has no owner yet.
+func newCodeAccount(input codeLogin) (*Account, error) {
+	switch input.method {
+	case MethodEmail:
+		return &Account{Email: input.target}, nil
+	default:
+		return nil, ErrInvalidInput
+	}
 }
 
 // LoginWechat uses only a server-verified identity. A first binding can reuse a
@@ -63,13 +103,13 @@ func (t *Transaction) LoginWechat(
 	var challenge *Challenge
 	if email != "" {
 		var rejected error
-		challenge, rejected, err = t.verifyEmail(ctx, email, input.EmailCode, now)
+		challenge, rejected, err = t.verifyCode(ctx, email, input.EmailCode, now)
 		if err != nil || rejected != nil {
 			return Outcome{Rejected: rejected}, err
 		}
 	}
 	openIDHash := digest(subject.OpenID)
-	user, err := t.repos.Users().GetByWechat(ctx, subject.AppID, openIDHash)
+	user, err := t.repos.Accounts().GetByWechat(ctx, openIDHash)
 	newBinding := errors.Is(err, ErrNotFound)
 	if err != nil && !newBinding {
 		return Outcome{}, err
@@ -78,7 +118,7 @@ func (t *Transaction) LoginWechat(
 	if newBinding {
 		user = nil
 		if email != "" {
-			user, err = t.repos.Users().GetByEmail(ctx, email)
+			user, err = t.repos.Accounts().GetByEmail(ctx, email)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return Outcome{}, err
 			}
@@ -87,18 +127,13 @@ func (t *Transaction) LoginWechat(
 			}
 		}
 		if user == nil {
-			user, err = t.createUser(
-				ctx,
-				email,
-				"wechat",
-				registrationRef(input.RegistrationRef, challenge),
-			)
+			user, err = t.createAccount(ctx, &Account{Email: email}, MethodWechat)
 			if err != nil {
 				return Outcome{}, err
 			}
 			created = true
 		}
-		if err = t.repos.Users().BindWechat(ctx, subject.AppID, openIDHash, user.ID); err != nil {
+		if err = t.repos.Accounts().BindWechat(ctx, openIDHash, user.ID); err != nil {
 			return Outcome{}, err
 		}
 	} else if email != "" {
@@ -120,7 +155,7 @@ func (t *Transaction) BindEmail(
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !validEmailCode(input.Code) {
+	if !validCode(input.Code) {
 		return Outcome{}, ErrInvalidInput
 	}
 	now := t.now().UTC()
@@ -128,15 +163,15 @@ func (t *Transaction) BindEmail(
 	if err != nil {
 		return Outcome{}, err
 	}
-	challenge, rejected, err := t.verifyEmail(ctx, email, input.Code, now)
+	challenge, rejected, err := t.verifyCode(ctx, email, input.Code, now)
 	if err != nil || rejected != nil {
 		return Outcome{Rejected: rejected}, err
 	}
-	user, err := t.repos.Users().GetByID(ctx, current.ID)
+	user, err := t.repos.Accounts().GetByID(ctx, current.ID)
 	if err != nil {
 		return Outcome{}, err
 	}
-	bound, err := t.repos.Users().HasWechat(ctx, user.ID)
+	bound, err := t.repos.Accounts().HasWechat(ctx, user.ID)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -156,13 +191,13 @@ func (t *Transaction) BindEmail(
 	return outcome, nil
 }
 
-// verifyEmail returns expected proof failures separately so the attempt counter commits.
-func (t *Transaction) verifyEmail(
+// verifyCode returns expected proof failures separately so the attempt counter commits.
+func (t *Transaction) verifyCode(
 	ctx context.Context,
-	email, code string,
+	target, code string,
 	now time.Time,
 ) (*Challenge, error, error) {
-	challenge, err := t.repos.Challenges().Find(ctx, email)
+	challenge, err := t.repos.Challenges().Find(ctx, target)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrChallengeInvalid, nil
 	}
@@ -173,17 +208,18 @@ func (t *Transaction) verifyEmail(
 		return nil, ErrChallengeInvalid, nil
 	}
 	challenge.Attempts++
-	if subtle.ConstantTimeCompare([]byte(challenge.Hash), []byte(digest(email+code))) != 1 {
+	if subtle.ConstantTimeCompare([]byte(challenge.Hash), []byte(digest(target+code))) != 1 {
 		return nil, ErrChallengeMismatch, t.repos.Challenges().Save(ctx, challenge)
 	}
 	return challenge, nil, nil
 }
 
-// createUser requires an explicit admission decision before persisting the account.
-func (t *Transaction) createUser(
+// createAccount requires an explicit admission decision before persisting the account.
+func (t *Transaction) createAccount(
 	ctx context.Context,
-	email, method, reference string,
-) (*User, error) {
+	account *Account,
+	method string,
+) (*Account, error) {
 	if t.registration == nil {
 		return nil, ErrRegistrationDenied
 	}
@@ -191,22 +227,22 @@ func (t *Transaction) createUser(
 	if err != nil {
 		return nil, err
 	}
-	user := &User{ID: id, Email: email}
+	account.ID = id
 	if err = t.registration.Authorize(
 		ctx,
-		Registration{User: *user, Method: method, Reference: reference},
+		Registration{Account: *account, Method: method},
 	); err != nil {
 		return nil, err
 	}
-	if err = t.repos.Users().Create(ctx, user); err != nil {
+	if err = t.repos.Accounts().Create(ctx, account); err != nil {
 		return nil, err
 	}
-	return user, nil
+	return account, nil
 }
 
 // bindEmail preserves IDs and rejects mailbox replacement or cross-account merging.
-func (t *Transaction) bindEmail(ctx context.Context, user *User, email string) error {
-	existing, err := t.repos.Users().GetByEmail(ctx, email)
+func (t *Transaction) bindEmail(ctx context.Context, user *Account, email string) error {
+	existing, err := t.repos.Accounts().GetByEmail(ctx, email)
 	if err == nil && existing.ID != user.ID {
 		return ErrEmailAccountConflict
 	}
@@ -219,7 +255,7 @@ func (t *Transaction) bindEmail(ctx context.Context, user *User, email string) e
 	if user.Email != "" {
 		return ErrEmailBound
 	}
-	if err = t.repos.Users().BindEmail(ctx, user.ID, email); err != nil {
+	if err = t.repos.Accounts().BindEmail(ctx, user.ID, email); err != nil {
 		return err
 	}
 	user.Email = email
@@ -229,7 +265,7 @@ func (t *Transaction) bindEmail(ctx context.Context, user *User, email string) e
 // finishLogin consumes optional mailbox proof and persists only the token digest.
 func (t *Transaction) finishLogin(
 	ctx context.Context,
-	user *User,
+	account *Account,
 	challenge *Challenge,
 	created bool,
 	now time.Time,
@@ -245,12 +281,25 @@ func (t *Transaction) finishLogin(
 		return Outcome{}, err
 	}
 	expires := now.Add(SessionTTL)
-	if err = t.repos.Sessions().
-		Create(ctx, &Session{Hash: digest(token), UserID: user.ID, Expires: expires}); err != nil {
+	err = t.repos.Sessions().Create(
+		ctx,
+		&Session{
+			Hash:      digest(token),
+			AccountID: account.ID,
+			Expires:   expires,
+		},
+	)
+	if err != nil {
 		return Outcome{}, err
 	}
+
 	return Outcome{
-		Login: &LoginResult{User: *user, Token: token, Expires: expires, Created: created},
+		Login: &LoginResult{
+			Account: *account,
+			Token:   token,
+			Expires: expires,
+			Created: created,
+		},
 	}, nil
 }
 
@@ -260,24 +309,13 @@ func authenticate(
 	repos Repositories,
 	token string,
 	now time.Time,
-) (*User, error) {
+) (*Account, error) {
 	if !validToken(token) {
 		return nil, ErrUnauthorized
 	}
-	user, err := repos.Users().GetBySessionToken(ctx, digest(token), now)
+	user, err := repos.Accounts().GetBySessionToken(ctx, digest(token), now)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrUnauthorized
 	}
 	return user, err
-}
-
-// registrationRef prefers an explicitly supplied reference over the saved mail reference.
-func registrationRef(explicit string, challenge *Challenge) string {
-	if explicit != "" {
-		return explicit
-	}
-	if challenge != nil {
-		return challenge.RegistrationRef
-	}
-	return ""
 }

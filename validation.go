@@ -28,14 +28,14 @@ func normalizeWechatInput(input WechatLoginInput) (string, error) {
 	if input.Email == "" {
 		return "", nil
 	}
-	if !validEmailCode(input.EmailCode) {
+	if !validCode(input.EmailCode) {
 		return "", ErrInvalidInput
 	}
 	return NormalizeEmail(input.Email)
 }
 
-// validEmailCode permits a bounded wrong proof so failed guesses spend an attempt.
-func validEmailCode(code string) bool { return code != "" && len(code) <= 16 }
+// validCode permits a bounded wrong proof so failed guesses spend an attempt.
+func validCode(code string) bool { return code != "" && len(code) <= 16 }
 
 // validWechatCode applies transport bounds before any external request.
 func validWechatCode(code string) bool { return strings.TrimSpace(code) != "" && len(code) <= 512 }

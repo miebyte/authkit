@@ -5,17 +5,18 @@ import (
 	"time"
 )
 
-// UserRepository persists identities. Locking methods require a transaction.
-type UserRepository interface {
-	GetByEmail(context.Context, string) (*User, error)
-	GetByID(context.Context, string) (*User, error)
-	// GetByWechat exclusively locks the identity even before it has an owner.
-	GetByWechat(ctx context.Context, appID, openIDHash string) (*User, error)
-	BindWechat(ctx context.Context, appID, openIDHash, userID string) error
+// AccountRepository persists accounts and credential bindings.
+// Locking methods require a transaction.
+type AccountRepository interface {
+	GetByEmail(context.Context, string) (*Account, error)
+	GetByID(context.Context, string) (*Account, error)
+	// GetByWechat exclusively locks the OpenID even before it has an owner.
+	GetByWechat(ctx context.Context, openIDHash string) (*Account, error)
+	BindWechat(ctx context.Context, openIDHash, accountID string) error
 	HasWechat(context.Context, string) (bool, error)
-	BindEmail(ctx context.Context, userID, email string) error
-	Create(context.Context, *User) error
-	GetBySessionToken(ctx context.Context, hash string, now time.Time) (*User, error)
+	BindEmail(ctx context.Context, accountID, email string) error
+	Create(context.Context, *Account) error
+	GetBySessionToken(ctx context.Context, hash string, now time.Time) (*Account, error)
 }
 
 // ChallengeRepository serializes code issuance and consumption per mailbox.
@@ -40,7 +41,7 @@ type SessionRepository interface {
 
 // Repositories provides identities bound to one database handle or transaction.
 type Repositories interface {
-	Users() UserRepository
+	Accounts() AccountRepository
 	Challenges() ChallengeRepository
 	Rates() RateRepository
 	Sessions() SessionRepository

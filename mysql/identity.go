@@ -12,118 +12,210 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// userRepository persists account and application-scoped identity relationships.
-type userRepository struct{ db *gorm.DB }
+// accountRepository persists accounts and their credential bindings.
+type accountRepository struct{ db *gorm.DB }
 
-// GetByEmail returns the account associated with a normalized email address.
-func (r *userRepository) GetByEmail(ctx context.Context, email string) (*authkit.User, error) {
-	var m models.User
-	if err := r.db.WithContext(ctx).Where("email = ?", email).Take(&m).Error; err != nil {
-		return nil, mapError(err)
-	}
-	return mapper.UserModelToDomain(&m), nil
-}
-
-// GetByID locks an account before changing its identities.
-func (r *userRepository) GetByID(ctx context.Context, id string) (*authkit.User, error) {
-	var m models.User
-	if err := r.db.WithContext(ctx).
-		Where("id = ?", id).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Take(&m).Error; err != nil {
-		return nil, mapError(err)
-	}
-	return mapper.UserModelToDomain(&m), nil
-}
-
-// GetByWechat locks an identity even when it has no owner yet.
-func (r *userRepository) GetByWechat(
+// GetByEmail returns the account bound to a normalized email address.
+func (r *accountRepository) GetByEmail(
 	ctx context.Context,
-	appID, openIDHash string,
-) (*authkit.User, error) {
-	// Updating the key to itself takes an exclusive lock immediately, avoiding
-	// shared-lock upgrades when concurrent first logins find the same identity.
-	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		DoUpdates: clause.AssignmentColumns([]string{"app_id"}),
-	}).Create(&models.WechatAccount{AppID: appID, OpenIDHash: openIDHash}).Error; err != nil {
-		return nil, mapError(err)
+	email string,
+) (*authkit.Account, error) {
+	binding, err := r.findBinding(ctx, authkit.MethodEmail, email, false)
+	if err != nil {
+		return nil, err
 	}
-	var m models.WechatAccount
-	if err := r.db.WithContext(ctx).
-		Where("app_id = ? AND openid_hash = ?", appID, openIDHash).
-		Clauses(clause.Locking{Strength: "UPDATE"}).Take(&m).Error; err != nil {
-		return nil, mapError(err)
-	}
-	if m.UserID == nil {
+	if binding.AccountID == nil {
 		return nil, authkit.ErrNotFound
 	}
-	return r.GetByID(ctx, *m.UserID)
+	return r.findAccount(ctx, *binding.AccountID, false)
 }
 
-// BindWechat assigns a locked placeholder once; indexes prevent duplicate owners.
-func (r *userRepository) BindWechat(ctx context.Context, appID, openIDHash, userID string) error {
-	res := r.db.WithContext(ctx).Model(&models.WechatAccount{}).
-		Where("app_id = ? AND openid_hash = ? AND user_id IS NULL", appID, openIDHash).
-		Update("user_id", userID)
-	err := res.Error
-	if errors.Is(mapError(err), authkit.ErrConflict) {
-		return authkit.ErrWechatBound
+// GetByID locks an account before changing its bindings.
+func (r *accountRepository) GetByID(ctx context.Context, id string) (*authkit.Account, error) {
+	return r.findAccount(ctx, id, true)
+}
+
+// GetByWechat locks an OpenID even when it has no owner yet.
+func (r *accountRepository) GetByWechat(
+	ctx context.Context,
+	openIDHash string,
+) (*authkit.Account, error) {
+	// Updating the key to itself takes an exclusive lock immediately, avoiding
+	// shared-lock upgrades when concurrent first logins find the same OpenID.
+	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		DoUpdates: clause.AssignmentColumns([]string{"method"}),
+	}).Create(&models.Binding{
+		Method: authkit.MethodWechat, Identifier: openIDHash,
+	}).Error; err != nil {
+		return nil, mapError(err)
 	}
+	binding, err := r.findBinding(ctx, authkit.MethodWechat, openIDHash, true)
 	if err != nil {
-		return mapError(err)
+		return nil, err
 	}
-	if res.RowsAffected != 1 {
-		return authkit.ErrWechatBound
+	if binding.AccountID == nil {
+		return nil, authkit.ErrNotFound
 	}
-	return nil
+	return r.findAccount(ctx, *binding.AccountID, true)
 }
 
-// HasWechat reports whether any WeChat application has an identity for the account.
-func (r *userRepository) HasWechat(ctx context.Context, userID string) (bool, error) {
+// BindWechat assigns a locked OpenID once. One account keeps a single WeChat credential.
+func (r *accountRepository) BindWechat(ctx context.Context, openIDHash, accountID string) error {
+	return r.bind(ctx, authkit.MethodWechat, openIDHash, accountID)
+}
+
+// HasWechat reports whether the account has an OpenID binding.
+func (r *accountRepository) HasWechat(ctx context.Context, accountID string) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&models.WechatAccount{}).
-		Where("user_id = ?", userID).Count(&count).Error
+	err := r.db.WithContext(ctx).Model(&models.Binding{}).
+		Where("account_id = ? AND method = ?", accountID, authkit.MethodWechat).
+		Count(&count).Error
 	return count > 0, mapError(err)
 }
 
-// BindEmail assigns an unused email only to an account without an email.
-func (r *userRepository) BindEmail(ctx context.Context, userID, email string) error {
-	res := r.db.WithContext(ctx).Model(&models.User{}).
-		Where("id = ? AND email IS NULL", userID).
-		Update("email", email)
-	err := res.Error
-	if errors.Is(mapError(err), authkit.ErrConflict) {
-		return authkit.ErrEmailAccountConflict
-	}
-	if err != nil {
-		return mapError(err)
-	}
-	if res.RowsAffected != 1 {
-		return authkit.ErrEmailBound
-	}
-	return nil
+// BindEmail assigns an unused mailbox only to an account without an email.
+func (r *accountRepository) BindEmail(ctx context.Context, accountID, email string) error {
+	return r.bind(ctx, authkit.MethodEmail, email, accountID)
 }
 
-// Create inserts an account with a nullable email value.
-func (r *userRepository) Create(ctx context.Context, u *authkit.User) error {
-	return mapError(r.db.WithContext(ctx).Create(mapper.UserDomainToModel(u)).Error)
+// Create inserts an account and its mailbox binding when an email is present.
+func (r *accountRepository) Create(ctx context.Context, account *authkit.Account) error {
+	if err := mapError(r.db.WithContext(ctx).Create(accountModel(account)).Error); err != nil {
+		return err
+	}
+	if account.Email == "" {
+		return nil
+	}
+	return r.BindEmail(ctx, account.ID, account.Email)
 }
 
 // GetBySessionToken returns an account only while its matching session is live.
-func (r *userRepository) GetBySessionToken(
+func (r *accountRepository) GetBySessionToken(
 	ctx context.Context,
 	hash string,
 	now time.Time,
-) (*authkit.User, error) {
-	var m models.User
-	if err := r.db.WithContext(ctx).Model(&models.User{}).
-		Select("auth_users.*").
-		Joins("JOIN auth_sessions ON auth_sessions.user_id = auth_users.id").
+) (*authkit.Account, error) {
+	var m models.Account
+	if err := r.db.WithContext(ctx).Model(&models.Account{}).
+		Select("auth_accounts.*").
+		Joins("JOIN auth_sessions ON auth_sessions.account_id = auth_accounts.id").
 		Where("auth_sessions.hash = ? AND auth_sessions.expires > ?", hash, now.UTC()).
 		Take(&m).Error; err != nil {
 		return nil, mapError(err)
 	}
-	return mapper.UserModelToDomain(&m), nil
+	return r.withEmail(ctx, &m)
+}
+
+// findAccount loads an account, optionally locking the row before a binding change.
+func (r *accountRepository) findAccount(
+	ctx context.Context,
+	id string,
+	lock bool,
+) (*authkit.Account, error) {
+	query := r.db.WithContext(ctx).Where("id = ?", id)
+	if lock {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var m models.Account
+	if err := query.Take(&m).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return r.withEmail(ctx, &m)
+}
+
+// findBinding loads one credential, optionally locking it.
+func (r *accountRepository) findBinding(
+	ctx context.Context,
+	method, identifier string,
+	lock bool,
+) (*models.Binding, error) {
+	query := r.db.WithContext(ctx).Where("method = ? AND identifier = ?", method, identifier)
+	if lock {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var binding models.Binding
+	if err := query.Take(&binding).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return &binding, nil
+}
+
+// accountModel maps the public account onto its row. An empty username is stored as NULL.
+func accountModel(account *authkit.Account) *models.Account {
+	m := &models.Account{ID: account.ID}
+	if account.Username != "" {
+		username := account.Username
+		m.Username = &username
+	}
+	return m
+}
+
+// withEmail fills the mailbox projection from the account's email binding.
+func (r *accountRepository) withEmail(
+	ctx context.Context,
+	account *models.Account,
+) (*authkit.Account, error) {
+	var binding models.Binding
+	err := r.db.WithContext(ctx).
+		Where("account_id = ? AND method = ?", account.ID, authkit.MethodEmail).
+		Take(&binding).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return mapper.AccountToDomain(account, ""), nil
+	}
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return mapper.AccountToDomain(account, binding.Identifier), nil
+}
+
+// bind claims an unbound credential or inserts one. Indexes keep each credential unique
+// and each account limited to one credential of a method.
+func (r *accountRepository) bind(ctx context.Context, method, identifier, accountID string) error {
+	res := r.db.WithContext(ctx).Model(&models.Binding{}).
+		Where("method = ? AND identifier = ? AND account_id IS NULL", method, identifier).
+		Update("account_id", accountID)
+	if err := bindingConflict(method, res.Error); err != nil {
+		return err
+	}
+	if res.Error != nil {
+		return mapError(res.Error)
+	}
+	if res.RowsAffected == 1 {
+		return nil
+	}
+	if method == authkit.MethodWechat {
+		return authkit.ErrWechatBound
+	}
+	err := r.db.WithContext(ctx).Create(&models.Binding{
+		Method: method, Identifier: identifier, AccountID: &accountID,
+	}).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(mapError(err), authkit.ErrConflict) {
+		return mapError(err)
+	}
+	var count int64
+	if countErr := r.db.WithContext(ctx).Model(&models.Binding{}).
+		Where("account_id = ? AND method = ?", accountID, method).
+		Count(&count).Error; countErr != nil {
+		return mapError(countErr)
+	}
+	if count > 0 {
+		return authkit.ErrEmailBound
+	}
+	return authkit.ErrEmailAccountConflict
+}
+
+// bindingConflict maps a uniqueness failure onto the credential's public error.
+func bindingConflict(method string, err error) error {
+	if !errors.Is(mapError(err), authkit.ErrConflict) {
+		return nil
+	}
+	if method == authkit.MethodWechat {
+		return authkit.ErrWechatBound
+	}
+	return authkit.ErrEmailAccountConflict
 }
 
 // challengeRepository serializes every issuance and verification by mailbox.
@@ -156,7 +248,7 @@ func (r *challengeRepository) Find(ctx context.Context, email string) (*authkit.
 func (r *challengeRepository) Save(ctx context.Context, c *authkit.Challenge) error {
 	return mapError(r.db.WithContext(ctx).Model(&models.Challenge{}).
 		Where("email = ?", c.Email).Updates(map[string]any{
-		"hash": c.Hash, "registration_ref": c.RegistrationRef,
+		"hash":    c.Hash,
 		"expires": c.Expires.UTC(), "sent": c.Sent.UTC(),
 		"attempts": c.Attempts, "ready": c.Ready,
 	}).Error)
