@@ -1,0 +1,19 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - gofumpt
+    - gci
+    - golines
+  settings:
+    gofumpt:
+      module-path: github.com/superwhys/one-more-round
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/superwhys/one-more-round)
+  exclusions:
+    generated: strict
