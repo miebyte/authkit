@@ -1,63 +1,51 @@
-// Package models defines the authkit schema. Hosts explicitly migrate these models.
+// Package models 定义 authkit 核心数据表结构；宿主应用需显式迁移这些模型。
 package models
 
 import "time"
 
-// User persists an account; NULL permits multiple accounts without email addresses.
+// User 保存与登录方式无关的账号；邮箱、微信等身份归属保存在 Identity 中。
 type User struct {
-	ID    string  `gorm:"column:id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	Email *string `gorm:"column:email;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:email"`
+	// ID 是跨登录方式共享的账号标识，不随身份绑定或会话轮换而改变。
+	ID string `gorm:"column:id;type:varbinary(64);primaryKey"`
 }
 
-// TableName returns the account table.
+// TableName 返回账号表名。
 func (User) TableName() string { return "auth_users" }
 
-// WechatAccount serializes registration of each application-scoped identity.
-// Its nullable owner locks the identity before an account has been selected.
-type WechatAccount struct {
-	AppID      string  `gorm:"column:app_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey;uniqueIndex:app_user,priority:1"`
-	OpenIDHash string  `gorm:"column:openid_hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	UserID     *string `gorm:"column:user_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:app_user,priority:2;index:user_id"`
+// Identity 将命名空间、范围和主体组成的身份键唯一映射到账号。
+// 复合主键防止同一身份归属多个账号；identity_owner 唯一索引防止一个账号
+// 在同一命名空间和范围内绑定不同主体。UserID 可为 NULL，供首次登录先插入
+// 占位行并加锁；MySQL 唯一索引允许多个 NULL，占位行不会互相占用账号配额。
+// 身份键使用 VARBINARY 按字节比较，不受数据库默认大小写或重音排序规则影响。
+type Identity struct {
+	// Namespace 区分邮箱、微信等身份类别；不同验证方法可以共享同一类别。
+	Namespace string `gorm:"column:namespace;type:varbinary(64);primaryKey;uniqueIndex:identity_owner,priority:1"`
+	// Scope 划分应用等身份范围；无范围时使用非 NULL 的空字符串。
+	Scope string `gorm:"column:scope;type:varbinary(255);primaryKey;uniqueIndex:identity_owner,priority:2"`
+	// Subject 是插件规范化后的主体，例如邮箱地址或 OpenID 摘要。
+	Subject string `gorm:"column:subject;type:varbinary(254);primaryKey"`
+	// UserID 为空表示身份尚未归属账号；绑定后不得重新指派。
+	UserID *string `gorm:"column:user_id;type:varbinary(64);uniqueIndex:identity_owner,priority:3;index:user_id"`
 }
 
-// TableName returns the WeChat identity table.
-func (WechatAccount) TableName() string { return "auth_wechat_accounts" }
+// TableName 返回身份归属表名。
+func (Identity) TableName() string { return "auth_identities" }
 
-// Challenge persists code digests and non-secret host registration references.
-type Challenge struct {
-	Email           string    `gorm:"column:email;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	Hash            string    `gorm:"column:hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null"`
-	RegistrationRef string    `gorm:"column:registration_ref;type:text;not null"`
-	Expires         time.Time `gorm:"column:expires;type:datetime(6);not null"`
-	Sent            time.Time `gorm:"column:sent;type:datetime(6);not null"`
-	Attempts        int       `gorm:"column:attempts;type:int;not null"`
-	Ready           bool      `gorm:"column:ready;type:tinyint(1);not null"`
-}
-
-// TableName returns the verification challenge table.
-func (Challenge) TableName() string { return "auth_challenges" }
-
-// Rate persists a fixed hourly window for one hashed identifier.
-type Rate struct {
-	ID     string    `gorm:"column:id;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	Starts time.Time `gorm:"column:starts;type:datetime(6);not null"`
-	Hits   int       `gorm:"column:hits;type:int;not null"`
-}
-
-// TableName returns the send-rate table.
-func (Rate) TableName() string { return "auth_rates" }
-
-// Session persists application session digests, never plaintext credentials.
+// Session 保存应用会话摘要和到期时间，不保存明文 Token。
 type Session struct {
-	Hash    string    `gorm:"column:hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	UserID  string    `gorm:"column:user_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;index:user_id"`
+	// Hash 是明文 Token 的摘要，也是会话主键。
+	Hash string `gorm:"column:hash;type:varbinary(64);primaryKey"`
+	// UserID 指向会话所属账号，不绑定某一种登录方式。
+	UserID string `gorm:"column:user_id;type:varbinary(64);not null;index:user_id"`
+	// Expires 使用微秒精度；到期时刻起会话不再有效。
 	Expires time.Time `gorm:"column:expires;type:datetime(6);not null;index:expires"`
 }
 
-// TableName returns the application session table.
+// TableName 返回应用会话表名。
 func (Session) TableName() string { return "auth_sessions" }
 
-// AllModels returns fresh model values for an explicit host AutoMigrate call.
+// AllModels 返回供宿主显式迁移的三个核心模型实例。
+// 各登录插件单独提供所需表结构，避免仅启用微信时仍创建邮箱表。
 func AllModels() []any {
-	return []any{&User{}, &WechatAccount{}, &Challenge{}, &Rate{}, &Session{}}
+	return []any{&User{}, &Identity{}, &Session{}}
 }

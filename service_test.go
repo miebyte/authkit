@@ -3,35 +3,24 @@ package authkit
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
 
-// fixture keeps the clock, mailer and durable state under each test's control.
+// fixture 为每个核心测试提供独立存储与可控时钟，便于精确验证过期和回滚边界。
 type fixture struct {
 	service *Service
 	store   *memoryStore
-	mail    *capturedMail
-	wechat  *fakeWechat
 	now     time.Time
 }
 
-// newFixture wires a service with a deterministic clock and explicit registration policy.
-func newFixture(t *testing.T, policy RegistrationPolicy) *fixture {
+// newFixture 创建空账号服务并固定初始时间；测试可以推进 now，而不必实际等待。
+func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{
-		store: newMemoryStore(),
-		mail:  &capturedMail{},
-		now:   time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC),
-	}
-	f.wechat = &fakeWechat{
-		identity: WechatIdentity{AppID: "app-one", OpenID: "verified-open-id"},
-		store:    f.store,
-	}
+	f := &fixture{store: newMemoryStore(), now: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
 	var err error
-	f.service, err = NewService(f.store, f.mail, f.wechat, policy)
+	f.service, err = NewService(f.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,25 +28,22 @@ func newFixture(t *testing.T, policy RegistrationPolicy) *fixture {
 	return f
 }
 
-// issue sends a code through the public API and returns the captured delivery.
-func (f *fixture) issue(t *testing.T, email string) string {
-	t.Helper()
-	if err := f.service.SendCode(
-		context.Background(),
-		SendCodeInput{Email: email, IP: "192.0.2.1"},
-	); err != nil {
-		t.Fatal(err)
+// proof 构造核心单测使用的可信身份，不执行真实凭证验证。
+// 生产代码应使用插件产生该结果；这里直接构造以单独验证核心归属与会话规则。
+func proof(namespace, scope, subject string) VerifiedIdentity {
+	return VerifiedIdentity{
+		Identity: IdentityKey{Namespace: namespace, Scope: scope, Subject: subject},
+		Method:   namespace,
 	}
-	return f.mail.code
 }
 
-// loginEmail creates an explicitly admitted account through the public email flow.
-func (f *fixture) loginEmail(t *testing.T, email string) *LoginResult {
+// login 显式允许注册并完成一次独立登录，为绑定及会话测试准备已提交的账号。
+func (f *fixture) login(t *testing.T, verified VerifiedIdentity) *LoginResult {
 	t.Helper()
-	code := f.issue(t, email)
-	result, err := f.service.LoginEmail(
+	result, err := f.service.LoginVerified(
 		context.Background(),
-		EmailLoginInput{Email: email, Code: code},
+		verified,
+		RegistrationPolicyFunc(allowRegistration),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +51,7 @@ func (f *fixture) loginEmail(t *testing.T, email string) *LoginResult {
 	return result
 }
 
-// requireError verifies stable errors rather than provider-specific strings.
+// requireError 用 errors.Is 比较错误语义，允许实现保留错误包装信息。
 func requireError(t *testing.T, got, want error) {
 	t.Helper()
 	if !errors.Is(got, want) {
@@ -73,631 +59,272 @@ func requireError(t *testing.T, got, want error) {
 	}
 }
 
-// differentCode guarantees the attempted six-digit code is not the delivered code.
-func differentCode(code string) string {
-	if code == "000000" {
-		return "000001"
-	}
-	return "000000"
-}
-
-// TestEmailLifecycle exercises normalization, one-time proof, session TTL and logout.
-func TestEmailLifecycle(t *testing.T) {
+// TestIdentityLifecycle 验证首次注册、相同身份通过不同验证方式登录、摘要存储及身份列表。
+// 同时检查会话到期前一刻有效、到期时立即失效，以及重复退出的幂等性。
+func TestIdentityLifecycle(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	code := f.issue(t, "  Alice@Example.com  ")
-	if f.mail.email != "alice@example.com" || len(code) != 6 {
-		t.Fatalf("unexpected mail delivery: email %q, code length %d", f.mail.email, len(code))
+	f := newFixture(t)
+	verified := proof("email", "", "alice@example.com")
+	verified.Method = "email_code"
+	first := f.login(t, verified)
+	if !first.Created || first.User.ID == "" || len(first.Token) != 64 ||
+		!first.Expires.Equal(f.now.Add(SessionTTL)) {
+		t.Fatalf("unexpected result: %#v", first)
 	}
-	challenge := f.store.state.challenges["alice@example.com"]
-	if challenge.Hash == "" || challenge.Hash == code || !challenge.Ready ||
-		!challenge.Expires.Equal(f.now.Add(CodeTTL)) {
-		t.Fatal("challenge must contain a ready, expiring digest")
+	session := f.store.state.sessions[digest(first.Token)]
+	if session.UserID != first.User.ID || session.Hash == first.Token {
+		t.Fatal("session must persist only the credential digest")
 	}
-	result, err := f.service.LoginEmail(
-		ctx,
-		EmailLoginInput{Email: "ALICE@example.com", Code: code},
-	)
-	if err != nil {
+	// 验证方式可以变化，身份键保持一致时应复用账号，也不应再次执行注册准入。
+	verified.Method = "test_other_verifier"
+	repeat, err := f.service.LoginVerified(ctx, verified, nil)
+	if err != nil || repeat.Created || repeat.User.ID != first.User.ID {
+		t.Fatalf("repeat login = %v, %v", repeat, err)
+	}
+	identities, err := f.service.ListIdentities(ctx, first.User.ID)
+	if err != nil || len(identities) != 1 || identities[0].Key != verified.Identity {
+		t.Fatalf("identities = %v, %v", identities, err)
+	}
+	f.now = first.Expires.Add(-time.Nanosecond)
+	if _, err := f.service.Authenticate(ctx, first.Token); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Created || result.User.Email != "alice@example.com" || result.User.ID == "" ||
-		result.Token == "" ||
-		!result.Expires.Equal(f.now.Add(SessionTTL)) {
-		t.Fatalf("unexpected login result: %#v", result)
-	}
-	for digest, session := range f.store.state.sessions {
-		if digest == result.Token || digest == "" || session.UserID != result.User.ID {
-			t.Fatal("only token digests may be persisted")
-		}
-	}
-	user, err := f.service.Authenticate(ctx, result.Token)
-	if err != nil || user.ID != result.User.ID {
-		t.Fatalf("authenticate = %v, %v", user, err)
-	}
-	_, err = f.service.LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: code})
-	requireError(t, err, ErrChallengeInvalid)
-	if err := f.service.Logout(ctx, result.Token); err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.service.Authenticate(ctx, result.Token)
+	f.now = first.Expires
+	_, err = f.service.Authenticate(ctx, first.Token)
 	requireError(t, err, ErrUnauthorized)
-	if err := f.service.Logout(ctx, result.Token); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 2; i++ {
+		if err := f.service.Logout(ctx, first.Token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := f.store.state.sessions[digest(first.Token)]; ok {
+		t.Fatal("logout left a stored session")
 	}
 }
 
-// TestChallengeExpiryAndAttempts ensures failed proofs commit and exhaust the challenge.
-func TestChallengeExpiryAndAttempts(t *testing.T) {
-	t.Run("expiry", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		code := f.issue(t, "alice@example.com")
-		f.now = f.now.Add(CodeTTL)
-		_, err := f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: code},
-		)
-		requireError(t, err, ErrChallengeInvalid)
-		if len(f.store.state.users) != 0 {
-			t.Fatal("expired proof created an account")
-		}
-	})
-	t.Run("attempts", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		code := f.issue(t, "alice@example.com")
-		for attempt := 1; attempt <= MaxAttempts; attempt++ {
-			_, err := f.service.LoginEmail(
-				context.Background(),
-				EmailLoginInput{Email: "alice@example.com", Code: differentCode(code)},
-			)
-			requireError(t, err, ErrChallengeMismatch)
-			if got := f.store.state.challenges["alice@example.com"].Attempts; got != attempt {
-				t.Fatalf("durable attempts = %d, want %d", got, attempt)
-			}
-		}
-		_, err := f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: code},
-		)
-		requireError(t, err, ErrChallengeInvalid)
-		if len(f.store.state.users) != 0 {
-			t.Fatal("exhausted proof created an account")
-		}
-	})
-}
-
-// TestResendAndHourlyLimits checks the limits at their exact reset boundaries.
-func TestResendAndHourlyLimits(t *testing.T) {
-	t.Run("mailbox", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		old := f.issue(t, "alice@example.com")
-		err := f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
-		)
-		requireError(t, err, ErrResendTooSoon)
-		for i := 1; i < EmailRateLimit; i++ {
-			f.now = f.now.Add(ResendInterval)
-			f.issue(t, "alice@example.com")
-		}
-		f.now = f.now.Add(ResendInterval)
-		err = f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
-		)
-		requireError(t, err, ErrTooManyRequests)
-		if old != f.mail.code {
-			_, err = f.service.LoginEmail(
-				context.Background(),
-				EmailLoginInput{Email: "alice@example.com", Code: old},
-			)
-			requireError(t, err, ErrChallengeMismatch)
-		}
-		f.now = f.now.Truncate(time.Hour).Add(time.Hour)
-		f.issue(t, "alice@example.com")
-	})
-	t.Run("ip", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		for i := 0; i < IPRateLimit; i++ {
-			f.issue(t, fmt.Sprintf("user%d@example.com", i))
-		}
-		err := f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "another@example.com", IP: "192.0.2.1"},
-		)
-		requireError(t, err, ErrTooManyRequests)
-		if err := f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "another@example.com", IP: "192.0.2.2"},
-		); err != nil {
-			t.Fatal(err)
-		}
-		for key := range f.store.state.rates {
-			if strings.Contains(key, "@") || strings.Contains(key, "192.0.2.") {
-				t.Fatal("rate keys expose raw identifiers")
-			}
-		}
-	})
-}
-
-// TestSendFailureAndReplacement keeps undelivered or superseded challenges unusable.
-func TestSendFailureAndReplacement(t *testing.T) {
-	t.Run("delivery failure", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		f.mail.err = errors.New("provider failure")
-		err := f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
-		)
-		requireError(t, err, ErrMailFailed)
-		_, err = f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: f.mail.code},
-		)
-		requireError(t, err, ErrChallengeInvalid)
-		f.mail.err = nil
-		f.now = f.now.Add(ResendInterval)
-		f.loginEmail(t, "alice@example.com")
-	})
-	t.Run("late delivery", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		var current string
-		f.mail.hook = func() {
-			f.mail.hook = nil
-			f.now = f.now.Add(ResendInterval)
-			current = f.issue(t, "alice@example.com")
-		}
-		err := f.service.SendCode(
-			context.Background(),
-			SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"},
-		)
-		requireError(t, err, ErrChallengeUpdated)
-		_, err = f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: current},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-	t.Run("late delivery with repeated code", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		ctx := context.Background()
-		f.mail.hook = func() {
-			f.mail.hook = nil
-			// Model a later issuance randomly choosing the same six-digit code.
-			newer := f.store.state.challenges["alice@example.com"]
-			newer.Sent = newer.Sent.Add(ResendInterval)
-			newer.Expires = newer.Sent.Add(CodeTTL)
-			newer.RegistrationRef = "newer-host-reference"
-			f.store.state.challenges[newer.Email] = newer
-		}
-		err := f.service.SendCode(ctx, SendCodeInput{Email: "alice@example.com", IP: "192.0.2.1"})
-		requireError(t, err, ErrChallengeUpdated)
-		if f.store.state.challenges["alice@example.com"].Ready {
-			t.Fatal("old delivery activated the newer undelivered challenge")
-		}
-		_, err = f.service.LoginEmail(
-			ctx,
-			EmailLoginInput{Email: "alice@example.com", Code: f.mail.code},
-		)
-		requireError(t, err, ErrChallengeInvalid)
-	})
-}
-
-// TestRegistrationAdmission checks default denial, rollback and explicit reference precedence.
+// TestRegistrationAdmission 验证缺失策略或空策略函数默认拒绝注册，拒绝后没有残留写入。
+// 自定义策略应收到完整注册上下文，已有账号登录应直接复用账号、不再触发准入。
 func TestRegistrationAdmission(t *testing.T) {
-	t.Run("default denial and existing account", func(t *testing.T) {
-		f := newFixture(t, nil)
-		code := f.issue(t, "alice@example.com")
-		_, err := f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: code},
-		)
+	ctx := context.Background()
+	f := newFixture(t)
+	verified := proof("custom", "tenant", "subject")
+	verified.Method, verified.RegistrationRef = "custom_oauth", "host-ref"
+	for _, policy := range []RegistrationPolicy{nil, RegistrationPolicyFunc(nil)} {
+		_, err := f.service.LoginVerified(ctx, verified, policy)
 		requireError(t, err, ErrRegistrationDenied)
-		if len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
-			!f.store.state.challenges["alice@example.com"].Ready {
-			t.Fatal("admission rejection leaked writes or consumed proof")
+		if len(f.store.state.users) != 0 || len(f.store.state.identities) != 0 ||
+			len(f.store.state.sessions) != 0 {
+			t.Fatal("rejected registration left state")
 		}
-		f.store.state.users["existing"] = User{ID: "existing", Email: "alice@example.com"}
-		result, err := f.service.LoginEmail(
-			context.Background(),
-			EmailLoginInput{Email: "alice@example.com", Code: code},
-		)
-		if err != nil || result.User.ID != "existing" || result.Created {
-			t.Fatalf("existing login = %v, %v", result, err)
-		}
+	}
+	var seen Registration
+	denied := errors.New("host rejected")
+	policy := RegistrationPolicyFunc(func(_ context.Context, input Registration) error {
+		seen = input
+		return denied
 	})
-	for _, override := range []string{"", "host-login-reference"} {
-		t.Run("reference:"+override, func(t *testing.T) {
-			var seen Registration
-			f := newFixture(
-				t,
-				RegistrationPolicyFunc(
-					func(_ context.Context, registration Registration) error { seen = registration; return errPolicyFailure },
-				),
+	_, err := f.service.LoginVerified(ctx, verified, policy)
+	requireError(t, err, denied)
+	if seen.User.ID == "" || seen.Identity != verified.Identity || seen.Method != verified.Method ||
+		seen.Reference != verified.RegistrationRef || len(f.store.state.identities) != 0 {
+		t.Fatalf("registration input or rollback incorrect: %#v", seen)
+	}
+	f.login(t, verified)
+	seen = Registration{}
+	if _, err := f.service.LoginVerified(ctx, verified, policy); err != nil || seen.User.ID != "" {
+		t.Fatal("existing account unexpectedly ran registration policy", err)
+	}
+}
+
+// TestBinding 分别从邮箱身份和微信身份创建账号，再绑定另一种身份，验证归属与流程对称。
+// 覆盖当前 Token 轮换、其他设备会话保留、重复绑定，以及禁止替换身份和合并独立账号。
+func TestBinding(t *testing.T) {
+	ctx := context.Background()
+	for _, firstNamespace := range []string{"email", "wechat"} {
+		t.Run(firstNamespace, func(t *testing.T) {
+			f := newFixture(t)
+			firstProof, nextProof := proof(
+				"email",
+				"",
+				"alice@example.com",
+			), proof(
+				"wechat",
+				"app-one",
+				"openid-digest",
 			)
-			err := f.service.SendCode(
-				context.Background(),
-				SendCodeInput{
-					Email:           "alice@example.com",
-					IP:              "192.0.2.1",
-					RegistrationRef: "host-send-reference",
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
+			if firstNamespace == "wechat" {
+				firstProof, nextProof = nextProof, firstProof
 			}
-			_, err = f.service.LoginEmail(
-				context.Background(),
-				EmailLoginInput{
-					Email:           "alice@example.com",
-					Code:            f.mail.code,
-					RegistrationRef: override,
-				},
-			)
-			requireError(t, err, errPolicyFailure)
-			want := override
-			if want == "" {
-				want = "host-send-reference"
+			first := f.login(t, firstProof)
+			otherDevice := f.login(t, firstProof)
+			bound, err := f.service.BindVerified(ctx, first.Token, nextProof)
+			if err != nil || bound.User.ID != first.User.ID || bound.Created ||
+				bound.Token == first.Token {
+				t.Fatalf("bind = %v, %v", bound, err)
 			}
-			if seen.Reference != want || seen.User.ID == "" ||
-				seen.User.Email != "alice@example.com" ||
-				seen.Method == "" {
-				t.Fatalf("policy received %#v", seen)
+			_, err = f.service.Authenticate(ctx, first.Token)
+			requireError(t, err, ErrUnauthorized)
+			for _, token := range []string{bound.Token, otherDevice.Token} {
+				user, err := f.service.Authenticate(ctx, token)
+				if err != nil || user.ID != first.User.ID {
+					t.Fatalf("session = %v, %v", user, err)
+				}
 			}
-			if len(f.store.state.users) != 0 ||
-				!f.store.state.challenges["alice@example.com"].Ready {
-				t.Fatal("policy failure did not roll back")
+			repeat, err := f.service.BindVerified(ctx, bound.Token, nextProof)
+			if err != nil || repeat.User.ID != first.User.ID || len(f.store.state.identities) != 2 {
+				t.Fatal("repeated binding changed identity ownership", err)
+			}
+			logged, err := f.service.LoginVerified(ctx, nextProof, nil)
+			if err != nil || logged.User.ID != first.User.ID || logged.Created {
+				t.Fatalf("bound login = %v, %v", logged, err)
+			}
+			replacement := nextProof
+			replacement.Identity.Subject = "another-subject"
+			_, err = f.service.BindVerified(ctx, repeat.Token, replacement)
+			requireError(t, err, ErrIdentityBound)
+			if len(f.store.state.identities) != 2 {
+				t.Fatal("failed replacement left a placeholder")
+			}
+			independentProof := proof("other-provider", "", "another-person")
+			independent := f.login(t, independentProof)
+			_, err = f.service.BindVerified(ctx, repeat.Token, independentProof)
+			requireError(t, err, ErrIdentityConflict)
+			if len(f.store.state.users) != 2 || independent.User.ID == first.User.ID {
+				t.Fatal("independently registered accounts were merged")
+			}
+			if _, err := f.service.Authenticate(ctx, repeat.Token); err != nil {
+				t.Fatal("failed bind revoked its session", err)
 			}
 		})
 	}
 }
 
-// TestWechatLogin verifies new and returning identity behavior and exchange ordering.
-func TestWechatLogin(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	first, err := f.service.LoginWechat(
-		ctx,
-		"one-time-provider-code",
-		WechatLoginInput{RegistrationRef: "host-reference"},
+// TestIdentityScopeIsolation 验证相同主体在不同命名空间或范围内属于不同身份。
+// 同一账号可以继续绑定其他范围的身份，不能把“每个范围一个”误实现为“每种插件一个”。
+func TestIdentityScopeIsolation(t *testing.T) {
+	f := newFixture(t)
+	first := f.login(t, proof("provider", "one", "same-subject"))
+	otherScope := f.login(t, proof("provider", "two", "same-subject"))
+	otherNamespace := f.login(t, proof("another-provider", "one", "same-subject"))
+	if first.User.ID == otherScope.User.ID || first.User.ID == otherNamespace.User.ID {
+		t.Fatal("identity scopes collided")
+	}
+	bound, err := f.service.BindVerified(
+		context.Background(),
+		first.Token,
+		proof("provider", "three", "subject"),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !first.Created || first.User.Email != "" || f.wechat.calledInsideTransaction {
-		t.Fatalf("unexpected first login: %#v", first)
-	}
-	second, err := f.service.LoginWechat(ctx, "next-provider-code", WechatLoginInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Created || first.User.ID != second.User.ID || first.Token == second.Token ||
-		len(f.store.state.users) != 1 {
-		t.Fatal("returning WeChat identity must reuse the account with a fresh session")
-	}
-	for key := range f.store.state.wechat {
-		if strings.Contains(key, f.wechat.identity.OpenID) {
-			t.Fatal("raw OpenID was persisted")
-		}
-	}
-	f.wechat.identity.OpenID = "another-verified-open-id"
-	third, err := f.service.LoginWechat(ctx, "another-code", WechatLoginInput{})
-	if err != nil || third.User.ID == first.User.ID {
-		t.Fatalf("second WeChat-only account = %v, %v", third, err)
+	if err != nil || bound.User.ID != first.User.ID {
+		t.Fatal("different scope should be bindable", err)
 	}
 }
 
-// TestWechatEmailProof attaches an unused identity to an existing proved mailbox.
-func TestWechatEmailProof(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
+// TestBindingRechecksSession 模拟预检查成功后、加锁读取前会话被撤销或到期。
+// 绑定必须重新拒绝该请求并回滚身份和会话写入，不能沿用首次读取的授权结果。
+func TestBindingRechecksSession(t *testing.T) {
 	ctx := context.Background()
-	account := f.loginEmail(t, "alice@example.com")
-	f.now = f.now.Add(ResendInterval)
-	code := f.issue(t, "alice@example.com")
-	result, err := f.service.LoginWechat(
-		ctx,
-		"provider-code",
-		WechatLoginInput{Email: "alice@example.com", EmailCode: code},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Created || result.User.ID != account.User.ID || len(f.store.state.users) != 1 {
-		t.Fatal("proved email did not reuse its existing account")
-	}
-	f.wechat.identity.OpenID = "different-open-id"
-	f.now = f.now.Add(ResendInterval)
-	code = f.issue(t, "alice@example.com")
-	_, err = f.service.LoginWechat(
-		ctx,
-		"provider-code",
-		WechatLoginInput{Email: "alice@example.com", EmailCode: code},
-	)
-	requireError(t, err, ErrWechatBound)
-	if len(f.store.state.users) != 1 || !f.store.state.challenges["alice@example.com"].Ready {
-		t.Fatal("binding conflict leaked writes")
+	for _, change := range []string{"revoke", "expire"} {
+		t.Run(change, func(t *testing.T) {
+			f := newFixture(t)
+			first := f.login(t, proof("one", "", "subject"))
+			f.store.beforeSessionLock = func(state *memoryState, hash string) {
+				if change == "revoke" {
+					delete(state.sessions, hash)
+				} else {
+					f.now = first.Expires
+				}
+			}
+			_, err := f.service.BindVerified(ctx, first.Token, proof("two", "", "subject"))
+			requireError(t, err, ErrUnauthorized)
+			if len(f.store.state.identities) != 1 || len(f.store.state.sessions) != 1 {
+				t.Fatal("invalid session permitted binding writes")
+			}
+		})
 	}
 }
 
-// TestWechatDoesNotMergeAccounts keeps independently registered email and WeChat identities separate.
-func TestWechatDoesNotMergeAccounts(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	emailUser := f.loginEmail(t, "alice@example.com")
-	wxUser, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.now = f.now.Add(ResendInterval)
-	code := f.issue(t, "alice@example.com")
-	_, err = f.service.BindEmail(
-		ctx,
-		wxUser.Token,
-		BindEmailInput{Email: "alice@example.com", Code: code},
-	)
-	requireError(t, err, ErrEmailAccountConflict)
-	_, err = f.service.LoginWechat(
-		ctx,
-		"another-provider-code",
-		WechatLoginInput{Email: "alice@example.com", EmailCode: code},
-	)
-	requireError(t, err, ErrEmailAccountConflict)
-	if len(f.store.state.users) != 2 || f.store.state.users[wxUser.User.ID].Email != "" ||
-		f.store.state.users[emailUser.User.ID].Email == "" {
-		t.Fatal("binding merged independent accounts")
-	}
-	if _, err := f.service.Authenticate(ctx, wxUser.Token); err != nil {
-		t.Fatal("failed binding revoked a valid session")
-	}
-}
-
-// TestBindEmailRotatesSession ensures email binding consumes proof and replaces the current token.
-func TestBindEmailRotatesSession(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	initial, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherDevice, err := f.service.LoginWechat(ctx, "other-device-code", WechatLoginInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	code := f.issue(t, "alice@example.com")
-	bound, err := f.service.BindEmail(
-		ctx,
-		initial.Token,
-		BindEmailInput{Email: "alice@example.com", Code: code},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bound.Created || bound.User.ID != initial.User.ID ||
-		bound.User.Email != "alice@example.com" ||
-		bound.Token == initial.Token {
-		t.Fatalf("unexpected bind result: %#v", bound)
-	}
-	_, err = f.service.Authenticate(ctx, initial.Token)
-	requireError(t, err, ErrUnauthorized)
-	user, err := f.service.Authenticate(ctx, bound.Token)
-	if err != nil || user.Email != "alice@example.com" {
-		t.Fatalf("bound authenticate = %v, %v", user, err)
-	}
-	if user, err := f.service.Authenticate(
-		ctx,
-		otherDevice.Token,
-	); err != nil ||
-		user.Email != "alice@example.com" {
-		t.Fatalf("other device session = %v, %v", user, err)
-	}
-	_, err = f.service.LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: code})
-	requireError(t, err, ErrChallengeInvalid)
-	f.now = f.now.Add(ResendInterval)
-	code = f.issue(t, "other@example.com")
-	_, err = f.service.BindEmail(
-		ctx,
-		bound.Token,
-		BindEmailInput{Email: "other@example.com", Code: code},
-	)
-	requireError(t, err, ErrEmailBound)
-}
-
-// TestWechatAdmissionAndProviderFailure proves rejected identities cannot leave state behind.
-func TestWechatAdmissionAndProviderFailure(t *testing.T) {
-	ctx := context.Background()
-	t.Run("missing policy", func(t *testing.T) {
-		f := newFixture(t, nil)
-		_, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
-		requireError(t, err, ErrRegistrationDenied)
-		if len(f.store.state.users) != 0 || len(f.store.state.wechat) != 0 ||
-			len(f.store.state.sessions) != 0 {
-			t.Fatal("denied WeChat registration persisted identity state")
-		}
-	})
-	t.Run("saved reference", func(t *testing.T) {
-		var seen Registration
-		f := newFixture(
-			t,
-			RegistrationPolicyFunc(
-				func(_ context.Context, registration Registration) error { seen = registration; return nil },
-			),
-		)
-		if err := f.service.SendCode(
-			ctx,
-			SendCodeInput{
-				Email:           "alice@example.com",
-				IP:              "192.0.2.1",
-				RegistrationRef: "host-mail-reference",
-			},
-		); err != nil {
-			t.Fatal(err)
-		}
-		result, err := f.service.LoginWechat(
-			ctx,
-			"provider-code",
-			WechatLoginInput{Email: "alice@example.com", EmailCode: f.mail.code},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if seen.Reference != "host-mail-reference" || seen.User.ID != result.User.ID ||
-			seen.User.Email != "alice@example.com" ||
-			seen.Method != "wechat" {
-			t.Fatalf("unexpected WeChat admission: %#v", seen)
-		}
-	})
-	t.Run("provider failure", func(t *testing.T) {
-		f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-		f.wechat.err = ErrWechatLogin
-		_, err := f.service.LoginWechat(ctx, "provider-code", WechatLoginInput{})
-		requireError(t, err, ErrWechatLogin)
-		if len(f.store.state.users) != 0 || len(f.store.state.wechat) != 0 ||
-			len(f.store.state.sessions) != 0 {
-			t.Fatal("failed provider exchange persisted identity state")
-		}
-	})
-}
-
-// TestTransactionPolicyOverride requires admission bound explicitly to the caller's transaction.
-func TestTransactionPolicyOverride(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	code := f.issue(t, "alice@example.com")
-	err := f.store.WithTransaction(ctx, func(repos Repositories) error {
-		_, err := f.service.InTransaction(repos, nil).
-			LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: code})
-		return err
-	})
-	requireError(t, err, ErrRegistrationDenied)
-	if len(f.store.state.users) != 0 || !f.store.state.challenges["alice@example.com"].Ready {
-		t.Fatal("transaction inherited a standalone admission policy")
-	}
-}
-
-// TestHostTransactionRollback discards identity writes when later host work fails.
+// TestHostTransactionRollback 验证核心登录成功后宿主业务失败，会撤销全部账号、身份和会话写入。
+// 事务中的临时 Token 不可认证，且宿主未显式提供准入策略时仍应拒绝新注册。
 func TestHostTransactionRollback(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
 	ctx := context.Background()
-	code := f.issue(t, "alice@example.com")
-	hostErr := errors.New("host group membership failed")
-	var issued *LoginResult
+	f := newFixture(t)
+	verified := proof("plugin", "", "subject")
+	hostErr := errors.New("host operation failed")
+	var provisional *LoginResult
 	err := f.store.WithTransaction(ctx, func(repos Repositories) error {
 		outcome, err := f.service.InTransaction(repos, RegistrationPolicyFunc(allowRegistration)).
-			LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: code})
+			LoginVerified(ctx, verified)
 		if err != nil {
 			return err
 		}
-		if outcome.Rejected != nil {
-			return outcome.Rejected
-		}
-		issued = outcome.Login
+		provisional = outcome.Login
 		return hostErr
 	})
 	requireError(t, err, hostErr)
-	if issued == nil || len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
-		!f.store.state.challenges["alice@example.com"].Ready {
-		t.Fatal("host failure did not roll back account, session and proof")
+	if provisional == nil || len(f.store.state.users) != 0 || len(f.store.state.identities) != 0 ||
+		len(f.store.state.sessions) != 0 {
+		t.Fatal("host rollback left identity writes")
 	}
-	_, err = f.service.Authenticate(ctx, issued.Token)
+	_, err = f.service.Authenticate(ctx, provisional.Token)
 	requireError(t, err, ErrUnauthorized)
-	if _, err := f.service.LoginEmail(
-		ctx,
-		EmailLoginInput{Email: "alice@example.com", Code: code},
-	); err != nil {
-		t.Fatal("rolled-back proof could not be retried:", err)
-	}
-}
-
-// TestHostTransactionRejected commits a bad attempt without permitting subsequent business work.
-func TestHostTransactionRejected(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	code := f.issue(t, "alice@example.com")
-	var rejected error
-	err := f.store.WithTransaction(ctx, func(repos Repositories) error {
-		outcome, err := f.service.InTransaction(repos, RegistrationPolicyFunc(allowRegistration)).
-			LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: differentCode(code)})
-		if err != nil {
-			return err
-		}
-		rejected = outcome.Rejected
-		if outcome.Login != nil {
-			t.Fatal("rejected proof issued a token")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireError(t, rejected, ErrChallengeMismatch)
-	if f.store.state.challenges["alice@example.com"].Attempts != 1 ||
-		len(f.store.state.users) != 0 {
-		t.Fatal("rejected outcome did not preserve only the failed attempt")
-	}
-}
-
-// TestSessionExpiry treats the exact expiration instant as unauthorized.
-func TestSessionExpiry(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	login := f.loginEmail(t, "alice@example.com")
-	f.now = login.Expires.Add(-time.Nanosecond)
-	if _, err := f.service.Authenticate(context.Background(), login.Token); err != nil {
-		t.Fatal(err)
-	}
-	f.now = login.Expires
-	_, err := f.service.Authenticate(context.Background(), login.Token)
-	requireError(t, err, ErrUnauthorized)
-}
-
-// TestInputValidation prevents malformed inputs and unknown credentials from producing state.
-func TestInputValidation(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	for _, email := range []string{"", "not-an-email", "Alice <alice@example.com>"} {
-		requireError(
-			t,
-			f.service.SendCode(ctx, SendCodeInput{Email: email, IP: "192.0.2.1"}),
-			ErrInvalidEmail,
-		)
-	}
-	for _, token := range []string{"", "unknown-token"} {
-		_, err := f.service.Authenticate(ctx, token)
-		requireError(t, err, ErrUnauthorized)
-	}
-	_, err := f.service.LoginEmail(ctx, EmailLoginInput{Email: "alice@example.com", Code: "123456"})
-	requireError(t, err, ErrChallengeInvalid)
-	if len(f.store.state.users) != 0 || len(f.store.state.sessions) != 0 ||
-		len(f.store.state.challenges) != 0 {
-		t.Fatal("invalid requests persisted identity state")
-	}
-}
-
-// TestUnissuedMailboxDoesNotAllocateChallenge prevents unauthenticated guesses from creating rows.
-func TestUnissuedMailboxDoesNotAllocateChallenge(t *testing.T) {
-	f := newFixture(t, RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	for i := 0; i < 3; i++ {
-		_, err := f.service.LoginEmail(
-			ctx,
-			EmailLoginInput{Email: fmt.Sprintf("unissued%d@example.com", i), Code: "123456"},
-		)
-		requireError(t, err, ErrChallengeInvalid)
-	}
-	var rejected error
-	err := f.store.WithTransaction(ctx, func(repos Repositories) error {
-		outcome, err := f.service.InTransaction(repos, nil).
-			LoginEmail(ctx, EmailLoginInput{Email: "unissued-host@example.com", Code: "123456"})
-		rejected = outcome.Rejected
+	err = f.store.WithTransaction(ctx, func(repos Repositories) error {
+		_, err := f.service.InTransaction(repos, nil).LoginVerified(ctx, verified)
 		return err
 	})
-	if err != nil {
-		t.Fatal(err)
+	requireError(t, err, ErrRegistrationDenied)
+}
+
+// TestCommitFailureDoesNotReturnToken 模拟最终提交失败，确保独立调用不会返回尚未生效的 Token。
+func TestCommitFailureDoesNotReturnToken(t *testing.T) {
+	f := newFixture(t)
+	f.store.commitErr = errors.New("commit failed")
+	result, err := f.service.LoginVerified(
+		context.Background(),
+		proof("plugin", "", "subject"),
+		RegistrationPolicyFunc(allowRegistration),
+	)
+	requireError(t, err, f.store.commitErr)
+	if result != nil || len(f.store.state.users) != 0 {
+		t.Fatal("commit failure leaked credentials or account")
 	}
-	requireError(t, rejected, ErrChallengeInvalid)
-	if len(f.store.state.challenges) != 0 || len(f.store.state.users) != 0 ||
+}
+
+// TestInvalidInputDoesNotAllocateState 覆盖缺失依赖、空身份字段、超长或非法编码、无效会话等输入。
+// 这些请求必须在产生持久化账号、身份或会话之前被拒绝。
+func TestInvalidInputDoesNotAllocateState(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := NewService(nil); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("nil store accepted")
+	}
+	valid := proof("plugin", "", "subject")
+	tests := []VerifiedIdentity{
+		{},
+		{Identity: valid.Identity},
+		proof("", "", "subject"), proof("plugin", "", ""),
+		proof(strings.Repeat("x", 65), "", "subject"),
+		proof("plugin", strings.Repeat("x", 256), "subject"),
+		proof("plugin", "", strings.Repeat("x", 255)),
+		proof("plugin", "", " subject"),
+		proof("plugin", "scope ", "subject"),
+		proof("plugin", "", string([]byte{0xff})),
+	}
+	badMethod := valid
+	badMethod.Method = strings.Repeat("x", 65)
+	tests = append(tests, badMethod)
+	for _, verified := range tests {
+		_, err := f.service.LoginVerified(ctx, verified, RegistrationPolicyFunc(allowRegistration))
+		requireError(t, err, ErrInvalidInput)
+	}
+	for _, token := range []string{"", "bad-token", strings.Repeat("a", 64)} {
+		_, err := f.service.BindVerified(ctx, token, valid)
+		requireError(t, err, ErrUnauthorized)
+		if err := f.service.Logout(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.store.state.users) != 0 || len(f.store.state.identities) != 0 ||
 		len(f.store.state.sessions) != 0 {
-		t.Fatal("unissued mailbox guesses allocated durable identity state")
+		t.Fatal("invalid request allocated state")
 	}
 }

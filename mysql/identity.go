@@ -3,7 +3,6 @@ package authmysql
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/miebyte/authkit"
 	"github.com/miebyte/authkit/mysql/mapper"
@@ -12,196 +11,144 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// userRepository persists account and application-scoped identity relationships.
+// userRepository 只持久化账号，登录方式的主体和归属另由 identityRepository 管理。
 type userRepository struct{ db *gorm.DB }
 
-// GetByEmail returns the account associated with a normalized email address.
-func (r *userRepository) GetByEmail(ctx context.Context, email string) (*authkit.User, error) {
-	var m models.User
-	if err := r.db.WithContext(ctx).Where("email = ?", email).Take(&m).Error; err != nil {
-		return nil, mapError(err)
-	}
-	return mapper.UserModelToDomain(&m), nil
-}
-
-// GetByID locks an account before changing its identities.
+// GetByID 读取账号但不加写锁，适用于只需认证身份的查询。
 func (r *userRepository) GetByID(ctx context.Context, id string) (*authkit.User, error) {
 	var m models.User
-	if err := r.db.WithContext(ctx).
-		Where("id = ?", id).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Take(&m).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("id = ?", id).Take(&m).Error; err != nil {
 		return nil, mapError(err)
 	}
 	return mapper.UserModelToDomain(&m), nil
 }
 
-// GetByWechat locks an identity even when it has no owner yet.
-func (r *userRepository) GetByWechat(
-	ctx context.Context,
-	appID, openIDHash string,
-) (*authkit.User, error) {
-	// Updating the key to itself takes an exclusive lock immediately, avoiding
-	// shared-lock upgrades when concurrent first logins find the same identity.
-	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		DoUpdates: clause.AssignmentColumns([]string{"app_id"}),
-	}).Create(&models.WechatAccount{AppID: appID, OpenIDHash: openIDHash}).Error; err != nil {
-		return nil, mapError(err)
-	}
-	var m models.WechatAccount
-	if err := r.db.WithContext(ctx).
-		Where("app_id = ? AND openid_hash = ?", appID, openIDHash).
+// Lock 使用 FOR UPDATE 锁定账号，供身份绑定和会话轮换使用。
+// 调用方应先取得身份行锁，再锁账号，最后锁当前会话，以保持统一锁序。
+func (r *userRepository) Lock(ctx context.Context, id string) (*authkit.User, error) {
+	var m models.User
+	if err := r.db.WithContext(ctx).Where("id = ?", id).
 		Clauses(clause.Locking{Strength: "UPDATE"}).Take(&m).Error; err != nil {
 		return nil, mapError(err)
 	}
-	if m.UserID == nil {
-		return nil, authkit.ErrNotFound
-	}
-	return r.GetByID(ctx, *m.UserID)
+	return mapper.UserModelToDomain(&m), nil
 }
 
-// BindWechat assigns a locked placeholder once; indexes prevent duplicate owners.
-func (r *userRepository) BindWechat(ctx context.Context, appID, openIDHash, userID string) error {
-	res := r.db.WithContext(ctx).Model(&models.WechatAccount{}).
-		Where("app_id = ? AND openid_hash = ? AND user_id IS NULL", appID, openIDHash).
-		Update("user_id", userID)
-	err := res.Error
-	if errors.Is(mapError(err), authkit.ErrConflict) {
-		return authkit.ErrWechatBound
-	}
-	if err != nil {
-		return mapError(err)
-	}
-	if res.RowsAffected != 1 {
-		return authkit.ErrWechatBound
-	}
-	return nil
-}
-
-// HasWechat reports whether any WeChat application has an identity for the account.
-func (r *userRepository) HasWechat(ctx context.Context, userID string) (bool, error) {
-	var count int64
-	err := r.db.WithContext(ctx).Model(&models.WechatAccount{}).
-		Where("user_id = ?", userID).Count(&count).Error
-	return count > 0, mapError(err)
-}
-
-// BindEmail assigns an unused email only to an account without an email.
-func (r *userRepository) BindEmail(ctx context.Context, userID, email string) error {
-	res := r.db.WithContext(ctx).Model(&models.User{}).
-		Where("id = ? AND email IS NULL", userID).
-		Update("email", email)
-	err := res.Error
-	if errors.Is(mapError(err), authkit.ErrConflict) {
-		return authkit.ErrEmailAccountConflict
-	}
-	if err != nil {
-		return mapError(err)
-	}
-	if res.RowsAffected != 1 {
-		return authkit.ErrEmailBound
-	}
-	return nil
-}
-
-// Create inserts an account with a nullable email value.
+// Create 只插入账号 ID；创建账号与绑定首个身份必须处于同一事务。
 func (r *userRepository) Create(ctx context.Context, u *authkit.User) error {
 	return mapError(r.db.WithContext(ctx).Create(mapper.UserDomainToModel(u)).Error)
 }
 
-// GetBySessionToken returns an account only while its matching session is live.
-func (r *userRepository) GetBySessionToken(
+// identityRepository 管理已验证主体与账号之间的唯一归属。
+type identityRepository struct{ db *gorm.DB }
+
+// Lock 首次访问时插入 UserID 为 NULL 的占位行，随后使用 FOR UPDATE 加独占锁。
+// 冲突时对身份键做无实质变化的更新，使并发首登在同一行上串行化；调用方必须在事务中使用。
+func (r *identityRepository) Lock(
 	ctx context.Context,
-	hash string,
-	now time.Time,
-) (*authkit.User, error) {
-	var m models.User
-	if err := r.db.WithContext(ctx).Model(&models.User{}).
-		Select("auth_users.*").
-		Joins("JOIN auth_sessions ON auth_sessions.user_id = auth_users.id").
-		Where("auth_sessions.hash = ? AND auth_sessions.expires > ?", hash, now.UTC()).
-		Take(&m).Error; err != nil {
-		return nil, mapError(err)
-	}
-	return mapper.UserModelToDomain(&m), nil
-}
-
-// challengeRepository serializes every issuance and verification by mailbox.
-type challengeRepository struct{ db *gorm.DB }
-
-// Get locks the mailbox, inserting an unready placeholder if it has no code.
-func (r *challengeRepository) Get(ctx context.Context, email string) (*authkit.Challenge, error) {
-	epoch := time.Unix(0, 0).UTC()
+	key authkit.IdentityKey,
+) (*authkit.Identity, error) {
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		DoUpdates: clause.AssignmentColumns([]string{"email"}),
-	}).Create(&models.Challenge{Email: email, Expires: epoch, Sent: epoch}).Error; err != nil {
+		DoUpdates: clause.AssignmentColumns([]string{"namespace"}),
+	}).Create(&models.Identity{
+		Namespace: key.Namespace, Scope: key.Scope, Subject: key.Subject,
+	}).Error; err != nil {
 		return nil, mapError(err)
 	}
-	return r.Find(ctx, email)
-}
-
-// Find locks an existing challenge without allocating rows for unknown mailboxes.
-func (r *challengeRepository) Find(ctx context.Context, email string) (*authkit.Challenge, error) {
-	var m models.Challenge
+	var m models.Identity
 	if err := r.db.WithContext(ctx).
-		Where("email = ?", email).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Take(&m).Error; err != nil {
+		Where("namespace = ? AND scope = ? AND subject = ?", key.Namespace, key.Scope, key.Subject).
+		Clauses(clause.Locking{Strength: "UPDATE"}).Take(&m).Error; err != nil {
 		return nil, mapError(err)
 	}
-	return mapper.ChallengeModelToDomain(&m), nil
+	return mapper.IdentityModelToDomain(&m), nil
 }
 
-// Save explicitly writes zero and false values while retaining the locked row.
-func (r *challengeRepository) Save(ctx context.Context, c *authkit.Challenge) error {
-	return mapError(r.db.WithContext(ctx).Model(&models.Challenge{}).
-		Where("email = ?", c.Email).Updates(map[string]any{
-		"hash": c.Hash, "registration_ref": c.RegistrationRef,
-		"expires": c.Expires.UTC(), "sent": c.Sent.UTC(),
-		"attempts": c.Attempts, "ready": c.Ready,
-	}).Error)
-}
-
-// rateRepository counts send attempts within a fixed hourly window.
-type rateRepository struct{ db *gorm.DB }
-
-// Hit atomically checks and increments a rate bucket within its transaction.
-func (r *rateRepository) Hit(ctx context.Context, id string, now time.Time, limit int) error {
-	now = now.UTC()
-	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		DoUpdates: clause.AssignmentColumns([]string{"id"}),
-	}).Create(&models.Rate{ID: id, Starts: now}).Error; err != nil {
-		return mapError(err)
+// Bind 仅将已锁定的 NULL 占位行指派给账号，不覆盖已有归属。
+// 主键保证主体不被另一个账号取得，identity_owner 唯一索引保证一个账号在
+// 同一命名空间和范围内只绑定一个主体；两类冲突分别返回稳定错误。
+func (r *identityRepository) Bind(
+	ctx context.Context,
+	key authkit.IdentityKey,
+	userID string,
+) error {
+	res := r.db.WithContext(ctx).Model(&models.Identity{}).
+		Where("namespace = ? AND scope = ? AND subject = ? AND user_id IS NULL",
+			key.Namespace, key.Scope, key.Subject).
+		Update("user_id", userID)
+	if errors.Is(mapError(res.Error), authkit.ErrConflict) {
+		return authkit.ErrIdentityBound
 	}
-	var m models.Rate
+	if res.Error != nil {
+		return mapError(res.Error)
+	}
+	if res.RowsAffected == 1 {
+		return nil
+	}
+	var m models.Identity
 	if err := r.db.WithContext(ctx).
-		Where("id = ?", id).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("namespace = ? AND scope = ? AND subject = ?", key.Namespace, key.Scope, key.Subject).
 		Take(&m).Error; err != nil {
 		return mapError(err)
 	}
-	if now.Sub(m.Starts) >= time.Hour {
-		m.Starts = now
-		m.Hits = 0
+	if m.UserID == nil {
+		return authkit.ErrConflict
 	}
-	if m.Hits >= limit {
-		return authkit.ErrTooManyRequests
+	if *m.UserID != userID {
+		return authkit.ErrIdentityConflict
 	}
-	return mapError(r.db.WithContext(ctx).Model(&models.Rate{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"starts": m.Starts, "hits": m.Hits + 1}).Error)
+	return nil
 }
 
-// sessionRepository persists and revokes application session digests.
+// ListByUser 按身份键排序返回账号已绑定的身份，不包含 UserID 为 NULL 的占位行。
+func (r *identityRepository) ListByUser(
+	ctx context.Context,
+	userID string,
+) ([]authkit.Identity, error) {
+	var rows []models.Identity
+	if err := r.db.WithContext(ctx).Where("user_id = ?", userID).
+		Order("namespace, scope, subject").Find(&rows).Error; err != nil {
+		return nil, mapError(err)
+	}
+	identities := make([]authkit.Identity, 0, len(rows))
+	for i := range rows {
+		identities = append(identities, *mapper.IdentityModelToDomain(&rows[i]))
+	}
+	return identities, nil
+}
+
+// sessionRepository 仅存储应用凭证的摘要、账号归属和到期时间。
 type sessionRepository struct{ db *gorm.DB }
 
-// Create inserts a session without persisting its plaintext credential.
-func (r *sessionRepository) Create(ctx context.Context, s *authkit.Session) error {
-	return mapError(r.db.WithContext(ctx).Create(mapper.SessionDomainToModel(s)).Error)
+// Get 不加写锁读取会话，供普通认证检查使用。
+func (r *sessionRepository) Get(ctx context.Context, hash string) (*authkit.Session, error) {
+	var m models.Session
+	if err := r.db.WithContext(ctx).Where("hash = ?", hash).Take(&m).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return mapper.SessionModelToDomain(&m), nil
 }
 
-// Delete revokes a session and also succeeds when it has already been revoked.
+// GetForUpdate 锁定当前会话，供绑定时重查其有效性并轮换凭证。
+// 调用方先锁身份和账号，再锁会话；并发使用同一 Token 时只有一次绑定可成功。
+func (r *sessionRepository) GetForUpdate(
+	ctx context.Context,
+	hash string,
+) (*authkit.Session, error) {
+	var m models.Session
+	if err := r.db.WithContext(ctx).Where("hash = ?", hash).
+		Clauses(clause.Locking{Strength: "UPDATE"}).Take(&m).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return mapper.SessionModelToDomain(&m), nil
+}
+
+// Create 仅持久化 Token 摘要；明文 Token 只由上层在事务提交后交付。
+func (r *sessionRepository) Create(ctx context.Context, session *authkit.Session) error {
+	return mapError(r.db.WithContext(ctx).Create(mapper.SessionDomainToModel(session)).Error)
+}
+
+// Delete 按摘要撤销单个会话；不存在时也返回成功，便于重复退出。
 func (r *sessionRepository) Delete(ctx context.Context, hash string) error {
-	return mapError(r.db.WithContext(ctx).Where("hash = ?", hash).
-		Delete(&models.Session{}).Error)
+	return mapError(r.db.WithContext(ctx).Where("hash = ?", hash).Delete(&models.Session{}).Error)
 }

@@ -2,151 +2,109 @@ package authkit
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"time"
 )
 
-// Transaction runs identity operations inside a caller-owned transaction.
-// Results, especially plaintext tokens, are provisional until the caller commits.
+// Transaction 在调用方提供的事务内执行账号、身份和会话操作。
+// 此对象不管理事务生命周期；即使方法已经返回 Token，整个宿主事务提交前也不能交付给客户端。
 type Transaction struct {
-	repos        Repositories
+	// repos 中的各仓储必须共享同一个事务，才能保证多张表的写入原子性。
+	repos Repositories
+	// registration 只在创建新账号时调用；nil 表示拒绝新注册。
 	registration RegistrationPolicy
 	now          func() time.Time
 }
 
-// LoginEmail consumes valid email proof and opens a session for the admitted account.
-func (t *Transaction) LoginEmail(ctx context.Context, input EmailLoginInput) (Outcome, error) {
-	email, err := NormalizeEmail(input.Email)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !validEmailCode(input.Code) {
+// LoginVerified 使用已验证身份查找或创建账号，并在当前事务中签发新会话。
+// 先锁定身份占位记录，使同一身份的并发注册依次执行；成功建号后，后续请求复用账号并跳过准入。
+// 凭证验证由插件在调用前完成；本方法只检查身份格式并处理账号归属。
+func (t *Transaction) LoginVerified(
+	ctx context.Context,
+	verified VerifiedIdentity,
+) (Outcome, error) {
+	if !validVerifiedIdentity(verified) {
 		return Outcome{}, ErrInvalidInput
 	}
-	now := t.now().UTC()
-	challenge, rejected, err := t.verifyEmail(ctx, email, input.Code, now)
-	if err != nil || rejected != nil {
-		return Outcome{Rejected: rejected}, err
+	// 尚未注册的身份也要先取得独占锁，不能以无锁的“查询不存在”作为新建账号依据。
+	identity, err := t.repos.Identities().Lock(ctx, verified.Identity)
+	if err != nil {
+		return Outcome{}, err
 	}
-	user, err := t.repos.Users().GetByEmail(ctx, email)
-	created := errors.Is(err, ErrNotFound)
+	created := identity.UserID == ""
+	var user *User
 	if created {
-		user, err = t.createUser(
-			ctx,
-			email,
-			"email",
-			registrationRef(input.RegistrationRef, challenge),
-		)
+		user, err = t.createUser(ctx, verified)
+		if err == nil {
+			err = t.repos.Identities().Bind(ctx, verified.Identity, user.ID)
+		}
+	} else {
+		user, err = t.repos.Users().Lock(ctx, identity.UserID)
 	}
 	if err != nil {
 		return Outcome{}, err
 	}
-	return t.finishLogin(ctx, user, challenge, created, now)
+	return t.issueSession(ctx, user, created)
 }
 
-// LoginWechat uses only a server-verified identity. A first binding can reuse a
-// proven email account; already independent accounts are never merged.
-func (t *Transaction) LoginWechat(
-	ctx context.Context,
-	subject WechatIdentity,
-	input WechatLoginInput,
-) (Outcome, error) {
-	if !validWechatIdentity(subject) {
-		return Outcome{}, ErrWechatLogin
-	}
-	email, err := normalizeWechatInput(input)
-	if err != nil {
-		return Outcome{}, err
-	}
-	now := t.now().UTC()
-	var challenge *Challenge
-	if email != "" {
-		var rejected error
-		challenge, rejected, err = t.verifyEmail(ctx, email, input.EmailCode, now)
-		if err != nil || rejected != nil {
-			return Outcome{Rejected: rejected}, err
-		}
-	}
-	openIDHash := digest(subject.OpenID)
-	user, err := t.repos.Users().GetByWechat(ctx, subject.AppID, openIDHash)
-	newBinding := errors.Is(err, ErrNotFound)
-	if err != nil && !newBinding {
-		return Outcome{}, err
-	}
-	created := false
-	if newBinding {
-		user = nil
-		if email != "" {
-			user, err = t.repos.Users().GetByEmail(ctx, email)
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				return Outcome{}, err
-			}
-			if errors.Is(err, ErrNotFound) {
-				user = nil
-			}
-		}
-		if user == nil {
-			user, err = t.createUser(
-				ctx,
-				email,
-				"wechat",
-				registrationRef(input.RegistrationRef, challenge),
-			)
-			if err != nil {
-				return Outcome{}, err
-			}
-			created = true
-		}
-		if err = t.repos.Users().BindWechat(ctx, subject.AppID, openIDHash, user.ID); err != nil {
-			return Outcome{}, err
-		}
-	} else if email != "" {
-		if err = t.bindEmail(ctx, user, email); err != nil {
-			return Outcome{}, err
-		}
-	}
-	return t.finishLogin(ctx, user, challenge, created, now)
-}
-
-// BindEmail verifies a mailbox for the live session owner and rotates the token
-// in the same transaction. A binding conflict leaves a correct code available.
-func (t *Transaction) BindEmail(
+// BindVerified 将已验证身份显式绑定到当前会话的账号，保持账号 ID 不变。
+// 身份已归其他账号或账号已有不同的同范围身份时返回冲突，禁止自动合并与替换。
+// 按身份、账号、当前会话的顺序加锁，再次检查会话后完成绑定及 Token 轮换。
+// 重复绑定原身份不会创建重复记录，但仍会轮换当前会话；失败时调用方必须回滚。
+func (t *Transaction) BindVerified(
 	ctx context.Context,
 	currentToken string,
-	input BindEmailInput,
+	verified VerifiedIdentity,
 ) (Outcome, error) {
-	email, err := NormalizeEmail(input.Email)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !validEmailCode(input.Code) {
+	if !validVerifiedIdentity(verified) {
 		return Outcome{}, ErrInvalidInput
 	}
-	now := t.now().UTC()
-	current, err := authenticate(ctx, t.repos, currentToken, now)
+	// 预检查使用无锁读取，只用于提前拒绝无效请求，不代替后面持锁后的会话复核。
+	current, err := t.Authenticate(ctx, currentToken)
 	if err != nil {
 		return Outcome{}, err
 	}
-	challenge, rejected, err := t.verifyEmail(ctx, email, input.Code, now)
-	if err != nil || rejected != nil {
-		return Outcome{Rejected: rejected}, err
-	}
-	user, err := t.repos.Users().GetByID(ctx, current.ID)
+	identity, err := t.repos.Identities().Lock(ctx, verified.Identity)
 	if err != nil {
 		return Outcome{}, err
 	}
-	bound, err := t.repos.Users().HasWechat(ctx, user.ID)
+	user, err := t.repos.Users().Lock(ctx, current.ID)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !bound {
-		return Outcome{}, ErrWechatRequired
+	// 等待身份锁或账号锁期间，Token 可能已被退出请求撤销，或已被另一次绑定轮换。
+	// 此处读取锁定后的最新会话，并使用当前时间检查过期，防止复用失效的会话授权。
+	session, err := t.repos.Sessions().GetForUpdate(ctx, digest(currentToken))
+	if errors.Is(err, ErrNotFound) {
+		return Outcome{}, ErrUnauthorized
 	}
-	if err = t.bindEmail(ctx, user, email); err != nil {
+	if err != nil {
 		return Outcome{}, err
 	}
-	outcome, err := t.finishLogin(ctx, user, challenge, false, now)
+	if session.UserID != user.ID || !t.now().UTC().Before(session.Expires) {
+		return Outcome{}, ErrUnauthorized
+	}
+	if identity.UserID != "" && identity.UserID != user.ID {
+		return Outcome{}, ErrIdentityConflict
+	}
+	if identity.UserID == "" {
+		// 账号锁串行化同一账号的并发绑定；数据库唯一约束还需独立保证每个范围只有一个身份。
+		identities, err := t.repos.Identities().ListByUser(ctx, user.ID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		for _, bound := range identities {
+			if bound.Key.Namespace == verified.Identity.Namespace &&
+				bound.Key.Scope == verified.Identity.Scope {
+				return Outcome{}, ErrIdentityBound
+			}
+		}
+		if err = t.repos.Identities().Bind(ctx, verified.Identity, user.ID); err != nil {
+			return Outcome{}, err
+		}
+	}
+	// 新会话的创建和旧会话的撤销必须同事务完成，任一步失败都不能保留部分轮换结果。
+	outcome, err := t.issueSession(ctx, user, false)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -156,34 +114,16 @@ func (t *Transaction) BindEmail(
 	return outcome, nil
 }
 
-// verifyEmail returns expected proof failures separately so the attempt counter commits.
-func (t *Transaction) verifyEmail(
-	ctx context.Context,
-	email, code string,
-	now time.Time,
-) (*Challenge, error, error) {
-	challenge, err := t.repos.Challenges().Find(ctx, email)
-	if errors.Is(err, ErrNotFound) {
-		return nil, ErrChallengeInvalid, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	if !challenge.Ready || !now.Before(challenge.Expires) || challenge.Attempts >= MaxAttempts {
-		return nil, ErrChallengeInvalid, nil
-	}
-	challenge.Attempts++
-	if subtle.ConstantTimeCompare([]byte(challenge.Hash), []byte(digest(email+code))) != 1 {
-		return nil, ErrChallengeMismatch, t.repos.Challenges().Save(ctx, challenge)
-	}
-	return challenge, nil, nil
+// Authenticate 供插件在校验新身份凭证前检查当前会话，避免无效会话消耗邮箱验证码等证明。
+// 它只做无锁读取，保持后续“先身份、后账号、再会话”的加锁顺序；BindVerified 会持锁复核。
+func (t *Transaction) Authenticate(ctx context.Context, token string) (*User, error) {
+	return authenticate(ctx, t.repos, token, t.now().UTC())
 }
 
-// createUser requires an explicit admission decision before persisting the account.
-func (t *Transaction) createUser(
-	ctx context.Context,
-	email, method, reference string,
-) (*User, error) {
+// createUser 生成账号 ID 后调用注册准入策略，通过后才在当前事务中插入账号。
+// 策略可以利用预先分配的账号 ID 处理宿主数据，但这些写入必须随当前事务一起提交或回滚。
+// 未配置策略时明确拒绝注册，策略返回的错误原样向上传递。
+func (t *Transaction) createUser(ctx context.Context, verified VerifiedIdentity) (*User, error) {
 	if t.registration == nil {
 		return nil, ErrRegistrationDenied
 	}
@@ -191,11 +131,13 @@ func (t *Transaction) createUser(
 	if err != nil {
 		return nil, err
 	}
-	user := &User{ID: id, Email: email}
-	if err = t.registration.Authorize(
-		ctx,
-		Registration{User: *user, Method: method, Reference: reference},
-	); err != nil {
+	user := &User{ID: id}
+	if err = t.registration.Authorize(ctx, Registration{
+		User:      *user,
+		Identity:  verified.Identity,
+		Method:    verified.Method,
+		Reference: verified.RegistrationRef,
+	}); err != nil {
 		return nil, err
 	}
 	if err = t.repos.Users().Create(ctx, user); err != nil {
@@ -204,57 +146,28 @@ func (t *Transaction) createUser(
 	return user, nil
 }
 
-// bindEmail preserves IDs and rejects mailbox replacement or cross-account merging.
-func (t *Transaction) bindEmail(ctx context.Context, user *User, email string) error {
-	existing, err := t.repos.Users().GetByEmail(ctx, email)
-	if err == nil && existing.ID != user.ID {
-		return ErrEmailAccountConflict
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	if user.Email == email {
-		return nil
-	}
-	if user.Email != "" {
-		return ErrEmailBound
-	}
-	if err = t.repos.Users().BindEmail(ctx, user.ID, email); err != nil {
-		return err
-	}
-	user.Email = email
-	return nil
-}
-
-// finishLogin consumes optional mailbox proof and persists only the token digest.
-func (t *Transaction) finishLogin(
-	ctx context.Context,
-	user *User,
-	challenge *Challenge,
-	created bool,
-	now time.Time,
-) (Outcome, error) {
-	if challenge != nil {
-		challenge.Ready = false
-		if err := t.repos.Challenges().Save(ctx, challenge); err != nil {
-			return Outcome{}, err
-		}
-	}
+// issueSession 生成独立的随机 Token，将其摘要和固定过期时间写入会话仓储。
+// 明文 Token 只存在于返回结果中；created 表示是否新建账号，不能用于判断是否新建会话。
+// 当前事务尚未提交，调用方后续失败时必须连同这条会话一起回滚。
+func (t *Transaction) issueSession(ctx context.Context, user *User, created bool) (Outcome, error) {
 	token, err := newID()
 	if err != nil {
 		return Outcome{}, err
 	}
-	expires := now.Add(SessionTTL)
-	if err = t.repos.Sessions().
-		Create(ctx, &Session{Hash: digest(token), UserID: user.ID, Expires: expires}); err != nil {
+	expires := t.now().UTC().Add(SessionTTL)
+	if err = t.repos.Sessions().Create(ctx, &Session{
+		Hash: digest(token), UserID: user.ID, Expires: expires,
+	}); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{
-		Login: &LoginResult{User: *user, Token: token, Expires: expires, Created: created},
-	}, nil
+	return Outcome{Login: &LoginResult{
+		User: *user, Token: token, Expires: expires, Created: created,
+	}}, nil
 }
 
-// authenticate avoids database lookups for malformed credentials and maps missing sessions.
+// authenticate 无锁读取会话和账号，供普通认证及绑定预检查共用。
+// 它先检查 Token 格式，再用摘要查询；缺失或过期统一视为未授权，其他存储错误原样返回。
+// 保持无锁读取可避免绑定流程在锁定身份之前，先持有账号锁或会话锁。
 func authenticate(
 	ctx context.Context,
 	repos Repositories,
@@ -264,20 +177,19 @@ func authenticate(
 	if !validToken(token) {
 		return nil, ErrUnauthorized
 	}
-	user, err := repos.Users().GetBySessionToken(ctx, digest(token), now)
+	session, err := repos.Sessions().Get(ctx, digest(token))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrUnauthorized
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !now.Before(session.Expires) {
+		return nil, ErrUnauthorized
+	}
+	user, err := repos.Users().GetByID(ctx, session.UserID)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrUnauthorized
 	}
 	return user, err
-}
-
-// registrationRef prefers an explicitly supplied reference over the saved mail reference.
-func registrationRef(explicit string, challenge *Challenge) string {
-	if explicit != "" {
-		return explicit
-	}
-	if challenge != nil {
-		return challenge.RegistrationRef
-	}
-	return ""
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,14 +14,18 @@ import (
 
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/miebyte/authkit"
-	"github.com/miebyte/authkit/mysql"
+	"github.com/miebyte/authkit/email"
+	emailmysql "github.com/miebyte/authkit/email/mysql"
+	authmysql "github.com/miebyte/authkit/mysql"
 	"github.com/miebyte/authkit/mysql/models"
+	"github.com/miebyte/authkit/wechat"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// testDatabase creates a unique disposable database, regardless of the DSN database.
+// testDatabase 为每个用例创建随机命名的临时数据库，并仅在其中迁移核心表。
+// DSN 只用于连接同一 MySQL 实例；即使指定了库名，也不会删除或修改该原有数据库。
 func testDatabase(t *testing.T) (*gorm.DB, *authmysql.Store) {
 	t.Helper()
 	dsn := os.Getenv("AUTHKIT_MYSQL_DSN")
@@ -44,7 +47,7 @@ func testDatabase(t *testing.T) (*gorm.DB, *authmysql.Store) {
 		t.Fatal(err)
 	}
 	name := "authkit_test_" + hex.EncodeToString(id)
-	// Database DDL is intentionally explicit; tests never drop a caller's database.
+	// 只创建和清理本次生成的随机库；绝不删除 DSN 原有的数据库。
 	if _, err = admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {
 		t.Fatal(err)
 	}
@@ -80,57 +83,7 @@ func testDatabase(t *testing.T) (*gorm.DB, *authmysql.Store) {
 	return db, store
 }
 
-// memorySender captures codes only inside the test process.
-type memorySender struct {
-	mu    sync.Mutex
-	codes map[string]string
-}
-
-// SendCode records the latest delivered challenge for the test mailbox.
-func (m *memorySender) SendCode(_ context.Context, email, code string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.codes == nil {
-		m.codes = make(map[string]string)
-	}
-	m.codes[email] = code
-	return nil
-}
-
-// code returns the latest code delivered to an address.
-func (m *memorySender) code(email string) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.codes[email]
-}
-
-// testWechat returns a stable identity for each test code without network calls.
-type testWechat struct{}
-
-// ExchangeCode converts a test login code to an application-scoped identity.
-func (testWechat) ExchangeCode(_ context.Context, code string) (authkit.WechatIdentity, error) {
-	return authkit.WechatIdentity{AppID: "test-app", OpenID: code}, nil
-}
-
-// allowRegistration explicitly enables registration for isolated test fixtures.
-func allowRegistration(context.Context, authkit.Registration) error { return nil }
-
-// newService assembles real MySQL repositories with test delivery providers.
-func newService(
-	t *testing.T,
-	store *authmysql.Store,
-	sender *memorySender,
-	policy authkit.RegistrationPolicy,
-) *authkit.Service {
-	t.Helper()
-	svc, err := authkit.NewService(store, sender, testWechat{}, policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return svc
-}
-
-// countRows reads exact persisted counts for transaction assertions.
+// countRows 在当前临时库中查询模型的持久化行数，供事务和唯一性断言使用。
 func countRows(t *testing.T, db *gorm.DB, model any) int64 {
 	t.Helper()
 	var count int64
@@ -140,65 +93,391 @@ func countRows(t *testing.T, db *gorm.DB, model any) int64 {
 	return count
 }
 
-// TestNewStoreRejectsMissingConnection verifies setup fails before any operation.
+// allowRegistration 仅供测试显式放行新账号，不承担宿主业务准入逻辑。
+func allowRegistration(context.Context, authkit.Registration) error { return nil }
+
+// memorySender 在进程内记录最近发送的验证码，并用互斥锁支持并发发码测试。
+type memorySender struct {
+	mu    sync.Mutex
+	codes map[string]string
+}
+
+// SendCode 记录指定邮箱收到的验证码，不调用外部邮件服务。
+func (m *memorySender) SendCode(_ context.Context, address, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.codes == nil {
+		m.codes = make(map[string]string)
+	}
+	m.codes[address] = code
+	return nil
+}
+
+// code 读取测试邮箱最近收到的验证码。
+func (m *memorySender) code(address string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.codes[address]
+}
+
+// testWechat 为测试 code 返回固定应用下的服务端身份，不访问微信接口。
+type testWechat struct{}
+
+// ExchangeCode 将测试 code 映射为同应用内的 OpenID。
+func (testWechat) ExchangeCode(_ context.Context, code string) (wechat.Identity, error) {
+	return wechat.Identity{AppID: "test-app", OpenID: code}, nil
+}
+
+var errInvalidTicket = errors.New("invalid test ticket")
+
+// ticketPlugin 位于 authkit 包之外，只依赖公开的已验证身份入口。
+// 它用于证明增加登录方式不需要修改核心分支或数据库表结构。
+type ticketPlugin struct {
+	core   *authkit.Service
+	policy authkit.RegistrationPolicy
+}
+
+// ticketInput 模拟自定义插件的强类型凭证输入和宿主注册引用。
+type ticketInput struct {
+	Ticket    string
+	Scope     string
+	Subject   string
+	Reference string
+}
+
+// verified 仅将测试凭证转换为可信身份，错误凭证不进入核心事务。
+func (p ticketPlugin) verified(input ticketInput) (authkit.VerifiedIdentity, error) {
+	if input.Ticket != "verified-test-ticket" {
+		return authkit.VerifiedIdentity{}, errInvalidTicket
+	}
+	return authkit.VerifiedIdentity{
+		Identity: authkit.IdentityKey{
+			Namespace: "ticket", Scope: input.Scope, Subject: input.Subject,
+		},
+		Method: "ticket", RegistrationRef: input.Reference,
+	}, nil
+}
+
+// Login 在验证测试凭证后交给核心处理账号创建和会话签发。
+func (p ticketPlugin) Login(ctx context.Context, input ticketInput) (*authkit.LoginResult, error) {
+	verified, err := p.verified(input)
+	if err != nil {
+		return nil, err
+	}
+	return p.core.LoginVerified(ctx, verified, p.policy)
+}
+
+// Bind 在验证测试凭证后显式绑定当前会话所属账号。
+func (p ticketPlugin) Bind(
+	ctx context.Context,
+	token string,
+	input ticketInput,
+) (*authkit.LoginResult, error) {
+	verified, err := p.verified(input)
+	if err != nil {
+		return nil, err
+	}
+	return p.core.BindVerified(ctx, token, verified)
+}
+
+// TestNewStoreRejectsMissingConnection 验证空连接在创建仓储时立即被拒绝。
 func TestNewStoreRejectsMissingConnection(t *testing.T) {
 	if _, err := authmysql.NewStore(nil); !errors.Is(err, authkit.ErrInvalidInput) {
 		t.Fatalf("got %v", err)
 	}
 }
 
-// TestConcurrentSendCodeSameMailbox verifies issuance locks one mailbox at a time.
-func TestConcurrentSendCodeSameMailbox(t *testing.T) {
+// TestCoreModelsAreOptionalPluginSchema 验证核心迁移只创建三张表，未启用的插件无需建表。
+func TestCoreModelsAreOptionalPluginSchema(t *testing.T) {
+	db, _ := testDatabase(t)
+	if got := len(authmysql.Models()); got != 3 {
+		t.Fatalf("core model count = %d, want 3", got)
+	}
+	for _, name := range []string{"auth_users", "auth_identities", "auth_sessions"} {
+		if !db.Migrator().HasTable(name) {
+			t.Fatalf("missing core table %s", name)
+		}
+	}
+	for _, name := range []string{"auth_challenges", "auth_rates", "auth_wechat_accounts"} {
+		if db.Migrator().HasTable(name) {
+			t.Fatalf("core migration unexpectedly created %s", name)
+		}
+	}
+}
+
+// TestExternalPluginUsesOnlyCoreSchema 验证外部插件只凭已验证身份契约即可登录、绑定和准入。
+// 新命名空间无需改动核心分支或增加插件专属表，绑定仍轮换当前会话。
+func TestExternalPluginUsesOnlyCoreSchema(t *testing.T) {
 	db, store := testDatabase(t)
-	svc := newService(t, store, &memorySender{}, nil)
-	const email = "concurrent@example.com"
+	core, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var admitted authkit.Registration
+	plugin := ticketPlugin{core: core, policy: authkit.RegistrationPolicyFunc(
+		func(_ context.Context, registration authkit.Registration) error {
+			admitted = registration
+			return nil
+		},
+	)}
+	input := ticketInput{
+		Ticket:    "verified-test-ticket",
+		Scope:     "app-one",
+		Subject:   "external-subject",
+		Reference: "host-ref",
+	}
+	if _, err := plugin.Login(
+		ctx,
+		ticketInput{Ticket: "unverified", Scope: input.Scope, Subject: input.Subject},
+	); !errors.Is(
+		err,
+		errInvalidTicket,
+	) {
+		t.Fatalf("invalid proof = %v", err)
+	}
+	if countRows(t, db, &models.Identity{}) != 0 {
+		t.Fatal("invalid proof allocated identity state")
+	}
+	first, err := plugin.Login(ctx, input)
+	if err != nil || !first.Created || first.User.ID == "" {
+		t.Fatalf("external plugin registration = %#v, %v", first, err)
+	}
+	if admitted.User.ID != first.User.ID || admitted.Method != "ticket" ||
+		admitted.Identity.Namespace != "ticket" || admitted.Reference != "host-ref" {
+		t.Fatalf("registration metadata = %#v", admitted)
+	}
+	second, err := plugin.Bind(ctx, first.Token, ticketInput{
+		Ticket: "verified-test-ticket", Scope: "app-two", Subject: "external-subject",
+	})
+	if err != nil || second.User.ID != first.User.ID || second.Token == first.Token {
+		t.Fatalf("external plugin bind = %#v, %v", second, err)
+	}
+	if _, err := core.Authenticate(ctx, first.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+		t.Fatalf("old token survived bind: %v", err)
+	}
+	identities, err := core.ListIdentities(ctx, first.User.ID)
+	if err != nil || len(identities) != 2 {
+		t.Fatalf("listed identities = %#v, %v", identities, err)
+	}
+	withoutRegistration := ticketPlugin{core: core}
+	returning, err := withoutRegistration.Login(ctx, ticketInput{
+		Ticket: "verified-test-ticket", Scope: "app-two", Subject: "external-subject",
+	})
+	if err != nil || returning.Created || returning.User.ID != first.User.ID {
+		t.Fatalf("existing login without policy = %#v, %v", returning, err)
+	}
+	if _, err := withoutRegistration.Login(ctx, ticketInput{
+		Ticket: "verified-test-ticket", Scope: "app-three", Subject: "new-subject",
+	}); !errors.Is(err, authkit.ErrRegistrationDenied) {
+		t.Fatalf("new registration without policy = %v", err)
+	}
+	if countRows(t, db, &models.User{}) != 1 || countRows(t, db, &models.Identity{}) != 2 ||
+		countRows(t, db, &models.Session{}) != 2 {
+		t.Fatal("unexpected core rows after external plugin calls")
+	}
+	if db.Migrator().HasTable("auth_challenges") || db.Migrator().HasTable("auth_rates") {
+		t.Fatal("external plugin required email schema")
+	}
+}
+
+// TestConcurrentBindingWithOneSessionToken 验证同一 Token 并发绑定时仅有一次成功。
+// 另一事务锁定会话后重新检查撤销状态，不能凭先前的无锁认证继续绑定。
+func TestConcurrentBindingWithOneSessionToken(t *testing.T) {
+	db, store := testDatabase(t)
+	core, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := ticketPlugin{core: core, policy: authkit.RegistrationPolicyFunc(allowRegistration)}
+	ctx := context.Background()
+	login, err := plugin.Login(ctx, ticketInput{
+		Ticket: "verified-test-ticket", Scope: "original", Subject: "subject",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := make(chan struct{})
-	results := make(chan error, 2)
-	for i := 0; i < 2; i++ {
+	type result struct {
+		login *authkit.LoginResult
+		err   error
+	}
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for _, scope := range []string{"second", "third"} {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			<-start
-			results <- svc.SendCode(context.Background(), authkit.SendCodeInput{
-				Email: email, IP: "127.0.0.1",
+			bound, err := plugin.Bind(ctx, login.Token, ticketInput{
+				Ticket: "verified-test-ticket", Scope: scope, Subject: "subject",
+			})
+			results <- result{login: bound, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	var succeeded, unauthorized int
+	var newToken string
+	for result := range results {
+		switch {
+		case result.err == nil:
+			succeeded++
+			newToken = result.login.Token
+		case errors.Is(result.err, authkit.ErrUnauthorized):
+			unauthorized++
+		default:
+			t.Errorf("unexpected binding result: %#v, %v", result.login, result.err)
+		}
+	}
+	if succeeded != 1 || unauthorized != 1 || countRows(t, db, &models.Identity{}) != 2 ||
+		countRows(t, db, &models.Session{}) != 1 {
+		t.Fatalf("successful=%d unauthorized=%d", succeeded, unauthorized)
+	}
+	if _, err := core.Authenticate(ctx, login.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+		t.Fatalf("original token remains live: %v", err)
+	}
+	if _, err := core.Authenticate(ctx, newToken); err != nil {
+		t.Fatalf("replacement token is invalid: %v", err)
+	}
+}
+
+// TestIdentityUniquenessAndExactKeys 验证主体不能重归属，同账号同范围不能绑定两个主体。
+// 同时检查重音邮箱及大小写不同的应用范围均按字节区分。
+func TestIdentityUniquenessAndExactKeys(t *testing.T) {
+	db, store := testDatabase(t)
+	ctx := context.Background()
+	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
+		for _, id := range []string{"one", "two"} {
+			if err := r.Users().Create(ctx, &authkit.User{ID: id}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bind := func(key authkit.IdentityKey, userID string) error {
+		return store.WithTransaction(ctx, func(r authkit.Repositories) error {
+			if _, err := r.Identities().Lock(ctx, key); err != nil {
+				return err
+			}
+			return r.Identities().Bind(ctx, key, userID)
+		})
+	}
+	email := authkit.IdentityKey{Namespace: "email", Subject: "elise@example.com"}
+	if err := bind(email, "one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bind(email, "two"); !errors.Is(err, authkit.ErrIdentityConflict) {
+		t.Fatalf("identity reassignment = %v", err)
+	}
+	if err := bind(
+		authkit.IdentityKey{Namespace: "email", Subject: "other@example.com"},
+		"one",
+	); !errors.Is(
+		err,
+		authkit.ErrIdentityBound,
+	) {
+		t.Fatalf("second email on one account = %v", err)
+	}
+	for _, key := range []authkit.IdentityKey{
+		{Namespace: "email", Subject: "élise@example.com"},
+		{Namespace: "wechat", Scope: "CaseApp", Subject: "same-openid-hash"},
+		{Namespace: "wechat", Scope: "caseapp", Subject: "same-openid-hash"},
+	} {
+		if err := bind(key, "two"); err != nil {
+			t.Fatalf("exact identity key %#v: %v", key, err)
+		}
+	}
+	if got := countRows(t, db, &models.Identity{}); got != 4 {
+		t.Fatalf("identity rows = %d, want 4", got)
+	}
+	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
+		identities, err := r.Identities().ListByUser(ctx, "two")
+		if err != nil {
+			return err
+		}
+		if len(identities) != 3 {
+			t.Fatalf("listed identities = %d, want 3", len(identities))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConcurrentDistinctIdentityBindings 验证唯一索引在并发时仍只允许同范围绑定一个主体。
+// 失败事务中的身份占位行必须回滚，不留下未归属记录。
+func TestConcurrentDistinctIdentityBindings(t *testing.T) {
+	db, store := testDatabase(t)
+	ctx := context.Background()
+	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
+		return r.Users().Create(ctx, &authkit.User{ID: "owner"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keys := []authkit.IdentityKey{
+		{Namespace: "wechat", Scope: "app-one", Subject: "subject-one"},
+		{Namespace: "wechat", Scope: "app-one", Subject: "subject-two"},
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(keys))
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- store.WithTransaction(ctx, func(r authkit.Repositories) error {
+				if _, err := r.Identities().Lock(ctx, key); err != nil {
+					return err
+				}
+				return r.Identities().Bind(ctx, key, "owner")
 			})
 		}()
 	}
 	close(start)
-	var succeeded, tooSoon int
-	for i := 0; i < 2; i++ {
-		switch err := <-results; {
+	wg.Wait()
+	close(results)
+	var succeeded, bound int
+	for err := range results {
+		switch {
 		case err == nil:
 			succeeded++
-		case errors.Is(err, authkit.ErrResendTooSoon):
-			tooSoon++
+		case errors.Is(err, authkit.ErrIdentityBound):
+			bound++
 		default:
-			t.Errorf("unexpected send error: %v", err)
+			t.Errorf("unexpected binding error: %v", err)
 		}
 	}
-	if succeeded != 1 || tooSoon != 1 {
-		t.Fatalf("succeeded=%d tooSoon=%d", succeeded, tooSoon)
-	}
-	var challenge models.Challenge
-	if err := db.Where("email = ?", email).Take(&challenge).Error; err != nil {
-		t.Fatal(err)
-	}
-	if countRows(t, db, &models.Challenge{}) != 1 || !challenge.Ready {
-		t.Fatal("expected one ready challenge")
+	if succeeded != 1 || bound != 1 || countRows(t, db, &models.Identity{}) != 1 {
+		t.Fatalf("successful=%d identity-bound=%d", succeeded, bound)
 	}
 }
 
-// TestConcurrentWechatRegistration verifies exclusive identity creation and sessions.
-func TestConcurrentWechatRegistration(t *testing.T) {
+// TestConcurrentVerifiedRegistration 验证同一已验证主体并发首登只建一个账号。
+// 准入策略只调用一次，每个成功请求各获独立会话，数据库只保存 Token 摘要。
+func TestConcurrentVerifiedRegistration(t *testing.T) {
 	db, store := testDatabase(t)
-	var authorized atomic.Int32
-	svc := newService(
-		t,
-		store,
-		&memorySender{},
-		authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error {
-			authorized.Add(1)
-			return nil
-		}),
-	)
+	svc, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var admitted atomic.Int32
+	policy := authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error {
+		admitted.Add(1)
+		return nil
+	})
+	verified := authkit.VerifiedIdentity{
+		Identity: authkit.IdentityKey{
+			Namespace: "wechat",
+			Scope:     "test-app",
+			Subject:   "verified-openid-hash",
+		},
+		Method: "wechat",
+	}
 	const workers = 12
 	results := make(chan *authkit.LoginResult, workers)
 	errorsCh := make(chan error, workers)
@@ -209,11 +488,7 @@ func TestConcurrentWechatRegistration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			result, err := svc.LoginWechat(
-				context.Background(),
-				"same-openid",
-				authkit.WechatLoginInput{},
-			)
+			result, err := svc.LoginVerified(context.Background(), verified, policy)
 			if err != nil {
 				errorsCh <- err
 				return
@@ -249,12 +524,12 @@ func TestConcurrentWechatRegistration(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if len(tokens) != workers || created != 1 || authorized.Load() != 1 {
-		t.Fatalf("sessions=%d created=%d authorized=%d", len(tokens), created, authorized.Load())
+	if len(tokens) != workers || created != 1 || admitted.Load() != 1 {
+		t.Fatalf("sessions=%d created=%d admitted=%d", len(tokens), created, admitted.Load())
 	}
-	if countRows(t, db, &models.User{}) != 1 || countRows(t, db, &models.WechatAccount{}) != 1 ||
+	if countRows(t, db, &models.User{}) != 1 || countRows(t, db, &models.Identity{}) != 1 ||
 		countRows(t, db, &models.Session{}) != workers {
-		t.Fatal("unexpected persisted identity/session counts")
+		t.Fatal("unexpected persisted account/identity/session counts")
 	}
 	var sessions []models.Session
 	if err := db.Find(&sessions).Error; err != nil {
@@ -267,368 +542,362 @@ func TestConcurrentWechatRegistration(t *testing.T) {
 	}
 }
 
-// TestUniqueBindings verifies nullable emails and both directions of uniqueness.
-func TestUniqueBindings(t *testing.T) {
+// TestWechatAdmissionReferenceAndNilPolicy 验证微信注册引用传给准入策略。
+// 无策略时旧身份仍可登录，新身份注册遭拒且不留下占位行或账号。
+func TestWechatAdmissionReferenceAndNilPolicy(t *testing.T) {
 	db, store := testDatabase(t)
-	ctx := context.Background()
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		for _, id := range []string{"one", "two"} {
-			if err := r.Users().Create(ctx, &authkit.User{ID: id}); err != nil {
-				return err
-			}
-		}
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-one", strings.Repeat("a", 64)); !errors.Is(
-			err,
-			authkit.ErrNotFound,
-		) {
-			return err
-		}
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("a", 64), "one")
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if countRows(t, db, &models.User{}) != 2 {
-		t.Fatal("nullable email prevented separate WeChat accounts")
-	}
-	err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-one", strings.Repeat("b", 64)); !errors.Is(
-			err,
-			authkit.ErrNotFound,
-		) {
-			return err
-		}
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("b", 64), "one")
-	})
-	if !errors.Is(err, authkit.ErrWechatBound) {
-		t.Fatalf("duplicate application binding: %v", err)
-	}
-	err = store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		return r.Users().BindWechat(ctx, "app-one", strings.Repeat("a", 64), "two")
-	})
-	if !errors.Is(err, authkit.ErrWechatBound) {
-		t.Fatalf("identity reassignment: %v", err)
-	}
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if _, err := r.Users().
-			GetByWechat(ctx, "app-two", strings.Repeat("b", 64)); !errors.Is(
-			err,
-			authkit.ErrNotFound,
-		) {
-			return err
-		}
-		return r.Users().BindWechat(ctx, "app-two", strings.Repeat("b", 64), "one")
-	}); err != nil {
-		t.Fatalf("same account in different application: %v", err)
-	}
-	if err := store.WithTransaction(
-		ctx,
-		func(r authkit.Repositories) error { return r.Users().BindEmail(ctx, "one", "unique@example.com") },
-	); err != nil {
-		t.Fatal(err)
-	}
-	err = store.WithTransaction(
-		ctx,
-		func(r authkit.Repositories) error { return r.Users().BindEmail(ctx, "two", "unique@example.com") },
-	)
-	if !errors.Is(err, authkit.ErrEmailAccountConflict) {
-		t.Fatalf("email uniqueness: %v", err)
-	}
-}
-
-// hostAdmission represents a business write performed by a host admission policy.
-type hostAdmission struct {
-	ID string `gorm:"primaryKey"`
-}
-
-// TestHostTransactionRollback verifies host and authkit writes share one commit.
-func TestHostTransactionRollback(t *testing.T) {
-	db, store := testDatabase(t)
-	if err := db.AutoMigrate(&hostAdmission{}); err != nil {
-		t.Fatal(err)
-	}
-	svc := newService(t, store, &memorySender{}, nil)
-	ctx := context.Background()
-	subject, err := svc.ExchangeWechat(ctx, "host-rollback-openid")
+	core, err := authkit.NewService(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	failure := errors.New("host membership write failed")
+	var admitted authkit.Registration
+	withRegistration, err := wechat.NewService(core, testWechat{}, authkit.RegistrationPolicyFunc(
+		func(_ context.Context, registration authkit.Registration) error {
+			admitted = registration
+			return nil
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first, err := withRegistration.Login(ctx, wechat.LoginInput{
+		Code: "same-openid", RegistrationRef: "invitation-reference",
+	})
+	if err != nil || !first.Created {
+		t.Fatalf("first WeChat login = %#v, %v", first, err)
+	}
+	if admitted.User.ID != first.User.ID || admitted.Method != wechat.Method ||
+		admitted.Identity.Namespace != wechat.Namespace || admitted.Identity.Scope != "test-app" ||
+		admitted.Reference != "invitation-reference" {
+		t.Fatalf("registration metadata = %#v", admitted)
+	}
+	withoutRegistration, err := wechat.NewService(core, testWechat{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returning, err := withoutRegistration.Login(ctx, wechat.LoginInput{Code: "same-openid"})
+	if err != nil || returning.Created || returning.User.ID != first.User.ID {
+		t.Fatalf("existing login without policy = %#v, %v", returning, err)
+	}
+	if _, err := withoutRegistration.Login(
+		ctx,
+		wechat.LoginInput{Code: "new-openid"},
+	); !errors.Is(
+		err,
+		authkit.ErrRegistrationDenied,
+	) {
+		t.Fatalf("new login without policy = %v", err)
+	}
+	if countRows(t, db, &models.User{}) != 1 || countRows(t, db, &models.Identity{}) != 1 {
+		t.Fatal("denied registration left persisted account or identity")
+	}
+}
+
+// TestHostTransactionRollback 验证宿主业务回滚会同时撤销账号、身份和会话写入。
+// 事务内产生的临时 Token 在提交失败后不能用于认证。
+func TestHostTransactionRollback(t *testing.T) {
+	db, store := testDatabase(t)
+	svc, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	verified := authkit.VerifiedIdentity{
+		Identity: authkit.IdentityKey{
+			Namespace: "wechat",
+			Scope:     "test-app",
+			Subject:   "rollback-subject",
+		},
+		Method: "wechat",
+	}
+	failure := errors.New("host write failed")
+	var issued *authkit.LoginResult
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		policy := authkit.RegistrationPolicyFunc(
-			func(ctx context.Context, registration authkit.Registration) error {
-				return tx.WithContext(ctx).Create(&hostAdmission{ID: registration.User.ID}).Error
-			},
-		)
-		outcome, err := svc.InTransaction(authmysql.Bind(tx), policy).
-			LoginWechat(ctx, subject, authkit.WechatLoginInput{})
+		outcome, err := svc.InTransaction(authmysql.Bind(tx), authkit.RegistrationPolicyFunc(allowRegistration)).
+			LoginVerified(ctx, verified)
 		if err != nil {
 			return err
 		}
-		if outcome.Rejected != nil {
-			t.Fatalf("unexpected rejection: %v", outcome.Rejected)
-		}
-		if outcome.Login == nil {
-			t.Fatal("missing provisional login")
-		}
+		issued = outcome.Login
 		return failure
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if !errors.Is(err, failure) {
-		t.Fatalf("got %v", err)
+	if !errors.Is(err, failure) || issued == nil {
+		t.Fatalf("transaction error=%v issued=%#v", err, issued)
 	}
-	for _, model := range []any{&models.User{}, &models.WechatAccount{}, &models.Session{}, &hostAdmission{}} {
+	for _, model := range []any{&models.User{}, &models.Identity{}, &models.Session{}} {
 		if countRows(t, db, model) != 0 {
 			t.Fatalf("rollback left persisted %T", model)
 		}
 	}
+	if _, err := svc.Authenticate(ctx, issued.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+		t.Fatalf("provisional token authenticated: %v", err)
+	}
 }
 
-// TestWrongCodeCommitsAttempts verifies both owned and host transactions reject durably.
-func TestWrongCodeCommitsAttempts(t *testing.T) {
+// TestEmailAndWechatExplicitBinding 验证邮箱与微信只能凭已登录会话显式绑定。
+// 绑定保留账号 ID、轮换当前 Token；跨账号占用冲突不会自动合并或撤销原会话。
+func TestEmailAndWechatExplicitBinding(t *testing.T) {
 	db, store := testDatabase(t)
+	if err := db.AutoMigrate(emailmysql.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	core, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emailStore, err := emailmysql.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sender := &memorySender{}
-	svc := newService(t, store, sender, authkit.RegistrationPolicyFunc(allowRegistration))
+	policy := authkit.RegistrationPolicyFunc(allowRegistration)
+	emails, err := email.NewService(core, emailStore, sender, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weixin, err := wechat.NewService(core, testWechat{}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
-	email := "attempts@example.com"
-	if err := svc.SendCode(
+	issue := func(address string) string {
+		t.Helper()
+		if err := emails.SendCode(
+			ctx,
+			email.SendCodeInput{Email: address, IP: "127.0.0.1"},
+		); err != nil {
+			t.Fatal(err)
+		}
+		return sender.code(address)
+	}
+	alice, err := emails.Login(ctx, email.LoginInput{
+		Email: "alice@example.com", Code: issue("alice@example.com"),
+	})
+	if err != nil || !alice.Created {
+		t.Fatalf("email registration = %#v, %v", alice, err)
+	}
+	boundWechat, err := weixin.Bind(ctx, alice.Token, wechat.BindInput{Code: "alice-openid"})
+	if err != nil || boundWechat.User.ID != alice.User.ID || boundWechat.Token == alice.Token {
+		t.Fatalf("WeChat binding = %#v, %v", boundWechat, err)
+	}
+	if _, err := core.Authenticate(ctx, alice.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+		t.Fatalf("old token survived binding: %v", err)
+	}
+	returning, err := weixin.Login(ctx, wechat.LoginInput{Code: "alice-openid"})
+	if err != nil || returning.Created || returning.User.ID != alice.User.ID {
+		t.Fatalf("bound WeChat login = %#v, %v", returning, err)
+	}
+	bob, err := emails.Login(ctx, email.LoginInput{
+		Email: "bob@example.com", Code: issue("bob@example.com"),
+	})
+	if err != nil || !bob.Created || bob.User.ID == alice.User.ID {
+		t.Fatalf("separate email registration = %#v, %v", bob, err)
+	}
+	if _, err := weixin.Bind(
 		ctx,
-		authkit.SendCodeInput{Email: email, IP: "127.0.0.1", RegistrationRef: "host-ref:中文"},
-	); err != nil {
+		bob.Token,
+		wechat.BindInput{Code: "alice-openid"},
+	); !errors.Is(
+		err,
+		authkit.ErrIdentityConflict,
+	) {
+		t.Fatalf("cross-account WeChat binding = %v", err)
+	}
+	if _, err := core.Authenticate(ctx, bob.Token); err != nil {
+		t.Fatalf("conflicting bind revoked existing session: %v", err)
+	}
+	charlie, err := weixin.Login(ctx, wechat.LoginInput{Code: "charlie-openid"})
+	if err != nil || !charlie.Created {
+		t.Fatalf("WeChat registration = %#v, %v", charlie, err)
+	}
+	boundEmail, err := emails.Bind(ctx, charlie.Token, email.BindInput{
+		Email: "charlie@example.com", Code: issue("charlie@example.com"),
+	})
+	if err != nil || boundEmail.User.ID != charlie.User.ID || boundEmail.Token == charlie.Token {
+		t.Fatalf("email binding = %#v, %v", boundEmail, err)
+	}
+	returning, err = emails.Login(ctx, email.LoginInput{
+		Email: "charlie@example.com", Code: sender.code("charlie@example.com"),
+	})
+	if !errors.Is(err, email.ErrChallengeInvalid) || returning != nil {
+		t.Fatalf("bound proof was reusable: %#v, %v", returning, err)
+	}
+	if got := countRows(t, db, &models.User{}); got != 3 {
+		t.Fatalf("account count = %d, want 3", got)
+	}
+	if got := countRows(t, db, &models.Identity{}); got != 5 {
+		t.Fatalf("identity count = %d, want 5", got)
+	}
+}
+
+// TestEmailChallengeAttemptsAndAdmissionWithMySQL 验证错误码次数在独立和宿主事务中均持久提交。
+// 准入拒绝不消耗正确验证码；成功登录后验证码只能使用一次，退出会撤销会话。
+func TestEmailChallengeAttemptsAndAdmissionWithMySQL(t *testing.T) {
+	db, store := testDatabase(t)
+	if err := db.AutoMigrate(emailmysql.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	core, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emailStore, err := emailmysql.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &memorySender{}
+	emails, err := email.NewService(
+		core,
+		emailStore,
+		sender,
+		authkit.RegistrationPolicyFunc(allowRegistration),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const address = "attempts@example.com"
+	if err := emails.SendCode(ctx, email.SendCodeInput{
+		Email: address, IP: "127.0.0.1", RegistrationRef: "host-ref:中文",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	wrong := "000000"
-	if sender.code(email) == wrong {
+	if sender.code(address) == wrong {
 		wrong = "000001"
 	}
-	if _, err := svc.LoginEmail(
+	if _, err := emails.Login(
 		ctx,
-		authkit.EmailLoginInput{Email: email, Code: wrong},
+		email.LoginInput{Email: address, Code: wrong},
 	); !errors.Is(
 		err,
-		authkit.ErrChallengeMismatch,
+		email.ErrChallengeMismatch,
 	) {
-		t.Fatalf("got %v", err)
+		t.Fatalf("wrong code = %v", err)
 	}
 	var rejection error
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		outcome, err := svc.InTransaction(authmysql.Bind(tx), nil).
-			LoginEmail(ctx, authkit.EmailLoginInput{Email: email, Code: wrong})
+		outcome, err := emails.InTransaction(
+			core.InTransaction(authmysql.Bind(tx), nil), emailmysql.Bind(tx),
+		).Login(ctx, email.LoginInput{Email: address, Code: wrong})
 		rejection = outcome.Rejected
 		return err
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted}); err != nil {
 		t.Fatal(err)
 	}
-	if !errors.Is(rejection, authkit.ErrChallengeMismatch) {
-		t.Fatalf("got %v", rejection)
+	if !errors.Is(rejection, email.ErrChallengeMismatch) {
+		t.Fatalf("host transaction rejection = %v", rejection)
 	}
-	var challenge models.Challenge
-	if err := db.First(&challenge, "email = ?", email).Error; err != nil {
+	var challenge emailmysql.Challenge
+	if err := db.Where("email = ?", address).Take(&challenge).Error; err != nil {
 		t.Fatal(err)
 	}
-	if challenge.Attempts != 2 || !challenge.Ready || challenge.RegistrationRef != "host-ref:中文" {
-		t.Fatalf("unexpected challenge: attempts=%d ready=%t", challenge.Attempts, challenge.Ready)
+	if challenge.Attempts != 2 || !challenge.Ready || challenge.RegistrationRef != "host-ref:中文" ||
+		countRows(t, db, &models.User{}) != 0 {
+		t.Fatal("wrong proofs did not durably count both failures")
 	}
-	denied := newService(t, store, sender, nil)
-	if _, err := denied.LoginEmail(
+	denied, err := email.NewService(core, emailStore, sender, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := denied.Login(
 		ctx,
-		authkit.EmailLoginInput{Email: email, Code: sender.code(email)},
+		email.LoginInput{Email: address, Code: sender.code(address)},
 	); !errors.Is(
 		err,
 		authkit.ErrRegistrationDenied,
 	) {
-		t.Fatalf("got %v", err)
+		t.Fatalf("missing registration policy = %v", err)
 	}
-	if err := db.First(&challenge, "email = ?", email).Error; err != nil {
+	if err := db.Where("email = ?", address).Take(&challenge).Error; err != nil {
 		t.Fatal(err)
 	}
 	if !challenge.Ready || challenge.Attempts != 2 {
-		t.Fatal("admission failure consumed the challenge")
+		t.Fatal("admission failure consumed the proof")
 	}
-	login, err := svc.LoginEmail(
-		ctx,
-		authkit.EmailLoginInput{Email: email, Code: sender.code(email)},
-	)
-	if err != nil {
-		t.Fatal(err)
+	login, err := emails.Login(ctx, email.LoginInput{Email: address, Code: sender.code(address)})
+	if err != nil || !login.Created {
+		t.Fatalf("successful email login = %#v, %v", login, err)
 	}
-	if _, err := svc.LoginEmail(
+	if _, err := emails.Login(
 		ctx,
-		authkit.EmailLoginInput{Email: email, Code: sender.code(email)},
+		email.LoginInput{Email: address, Code: sender.code(address)},
 	); !errors.Is(
 		err,
-		authkit.ErrChallengeInvalid,
+		email.ErrChallengeInvalid,
 	) {
-		t.Fatalf("code reuse: %v", err)
+		t.Fatalf("proof reused: %v", err)
 	}
-	if err := svc.Logout(ctx, login.Token); err != nil {
+	if err := core.Logout(ctx, login.Token); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Authenticate(ctx, login.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+	if _, err := core.Authenticate(ctx, login.Token); !errors.Is(err, authkit.ErrUnauthorized) {
 		t.Fatalf("logout: %v", err)
 	}
 }
 
-// TestConcurrentRateLimit verifies exact limits without lost increments or lock upgrades.
-func TestConcurrentRateLimit(t *testing.T) {
-	_, store := testDatabase(t)
-	const workers, limit = 20, 7
-	var accepted atomic.Int32
-	var wg sync.WaitGroup
+// TestConcurrentSendCodeSameMailbox 验证同一邮箱并发发码由挑战行锁串行化。
+// 只有一次发送成功，其余请求受到重发冷却约束，最终仅保留一条可用挑战。
+func TestConcurrentSendCodeSameMailbox(t *testing.T) {
+	db, store := testDatabase(t)
+	if err := db.AutoMigrate(emailmysql.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	core, err := authkit.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emailStore, err := emailmysql.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &memorySender{}
+	emails, err := email.NewService(
+		core,
+		emailStore,
+		sender,
+		authkit.RegistrationPolicyFunc(allowRegistration),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 12
 	start := make(chan struct{})
-	now := time.Now().UTC()
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			err := store.WithTransaction(context.Background(), func(r authkit.Repositories) error {
-				return r.Rates().Hit(context.Background(), strings.Repeat("a", 64), now, limit)
+			results <- emails.SendCode(context.Background(), email.SendCodeInput{
+				Email: "concurrent@example.com", IP: "127.0.0.1",
 			})
-			if err == nil {
-				accepted.Add(1)
-			} else if !errors.Is(err, authkit.ErrTooManyRequests) {
-				t.Error(err)
-			}
 		}()
 	}
 	close(start)
 	wg.Wait()
-	if accepted.Load() != limit {
-		t.Fatalf("accepted=%d, want=%d", accepted.Load(), limit)
+	close(results)
+	var sent, cooled int
+	for err := range results {
+		switch {
+		case err == nil:
+			sent++
+		case errors.Is(err, email.ErrResendTooSoon):
+			cooled++
+		default:
+			t.Errorf("unexpected SendCode error: %v", err)
+		}
 	}
-	if err := store.WithTransaction(context.Background(), func(r authkit.Repositories) error {
-		return r.Rates().
-			Hit(context.Background(), strings.Repeat("a", 64), now.Add(time.Hour), limit)
-	}); err != nil {
-		t.Fatalf("hourly reset: %v", err)
+	if sent != 1 || cooled != workers-1 || countRows(t, db, &emailmysql.Challenge{}) != 1 {
+		t.Fatalf("sent=%d cooled=%d", sent, cooled)
 	}
-}
-
-// TestSessionExpirationAndChallengeZeroValues verifies precision and explicit zero writes.
-func TestSessionExpirationAndChallengeZeroValues(t *testing.T) {
-	_, store := testDatabase(t)
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	hash := strings.Repeat("f", 64)
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		if err := r.Users().Create(ctx, &authkit.User{ID: "expiry-user"}); err != nil {
-			return err
-		}
-		if err := r.Sessions().
-			Create(ctx, &authkit.Session{Hash: hash, UserID: "expiry-user", Expires: now}); err != nil {
-			return err
-		}
-		challenge, err := r.Challenges().Get(ctx, "zero@example.com")
-		if err != nil {
-			return err
-		}
-		challenge.Hash, challenge.RegistrationRef, challenge.Attempts, challenge.Ready = hash, "ref", 4, true
-		if err := r.Challenges().Save(ctx, challenge); err != nil {
-			return err
-		}
-		challenge.Hash, challenge.RegistrationRef, challenge.Attempts, challenge.Ready = "", "", 0, false
-		return r.Challenges().Save(ctx, challenge)
-	}); err != nil {
+	var challenge emailmysql.Challenge
+	if err := db.Where("email = ?", "concurrent@example.com").Take(&challenge).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Users().
-		GetBySessionToken(ctx, hash, now.Add(-time.Microsecond)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Users().
-		GetBySessionToken(ctx, hash, now); !errors.Is(
-		err,
-		authkit.ErrNotFound,
-	) {
-		t.Fatalf("expiry boundary: %v", err)
-	}
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		challenge, err := r.Challenges().Get(ctx, "zero@example.com")
-		if err != nil {
-			return err
-		}
-		if challenge.Hash != "" || challenge.RegistrationRef != "" || challenge.Attempts != 0 ||
-			challenge.Ready {
-			t.Fatal("challenge failed to persist false/zero/empty values")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestMailboxCollationPreventsCrossAccountLogin keeps accent-distinct inboxes separate.
-func TestMailboxCollationPreventsCrossAccountLogin(t *testing.T) {
-	db, store := testDatabase(t)
-	sender := &memorySender{}
-	svc := newService(t, store, sender, authkit.RegistrationPolicyFunc(allowRegistration))
-	ctx := context.Background()
-	var accounts []string
-	for _, email := range []string{"elise@example.com", "élise@example.com"} {
-		if err := svc.SendCode(
-			ctx,
-			authkit.SendCodeInput{Email: email, IP: "127.0.0.1"},
-		); err != nil {
-			t.Fatal(err)
-		}
-		login, err := svc.LoginEmail(
-			ctx,
-			authkit.EmailLoginInput{Email: email, Code: sender.code(email)},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !login.Created || login.User.Email != email {
-			t.Fatal("mailbox resolved to an existing different account")
-		}
-		accounts = append(accounts, login.User.ID)
-	}
-	if accounts[0] == accounts[1] || countRows(t, db, &models.User{}) != 2 ||
-		countRows(t, db, &models.Challenge{}) != 2 {
-		t.Fatal("accent-distinct inboxes shared a challenge or account")
-	}
-	// App IDs and user IDs are also exact identifiers, independent of host collation.
-	if err := store.WithTransaction(ctx, func(r authkit.Repositories) error {
-		for _, id := range []string{"CaseID", "caseid"} {
-			if err := r.Users().Create(ctx, &authkit.User{ID: id}); err != nil {
-				return err
-			}
-		}
-		for _, app := range []string{"CaseApp", "caseapp"} {
-			if _, err := r.Users().
-				GetByWechat(ctx, app, strings.Repeat("c", 64)); !errors.Is(
-				err,
-				authkit.ErrNotFound,
-			) {
-				return err
-			}
-			if err := r.Users().
-				BindWechat(ctx, app, strings.Repeat("c", 64), "CaseID"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("exact identifier columns: %v", err)
-	}
-	if countRows(t, db, &models.WechatAccount{}) != 2 {
-		t.Fatal("application IDs compared case-insensitively")
-	}
-}
-
-// TestUnknownMailboxVerificationDoesNotAllocateRows keeps login misses read-only.
-func TestUnknownMailboxVerificationDoesNotAllocateRows(t *testing.T) {
-	db, store := testDatabase(t)
-	svc := newService(t, store, &memorySender{}, authkit.RegistrationPolicyFunc(allowRegistration))
-	_, err := svc.LoginEmail(
-		context.Background(),
-		authkit.EmailLoginInput{Email: "unknown@example.com", Code: "123456"},
-	)
-	if !errors.Is(err, authkit.ErrChallengeInvalid) {
-		t.Fatalf("got %v", err)
-	}
-	if countRows(t, db, &models.Challenge{}) != 0 {
-		t.Fatal("invalid login allocated a challenge row")
+	if !challenge.Ready || sender.code("concurrent@example.com") == "" {
+		t.Fatal("successful delivery did not activate its challenge")
 	}
 }
