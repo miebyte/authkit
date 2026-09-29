@@ -33,7 +33,7 @@ func NewStore(db *gorm.DB) (*Store, error) {
 
 // Bind attaches repositories to a valid host-owned transaction. The host must use
 // read-committed isolation, commit verification rejections and roll back errors.
-func Bind(tx *gorm.DB) authkit.Repositories {
+func Bind(tx *gorm.DB) authkit.Store {
 	return &Store{db: tx}
 }
 

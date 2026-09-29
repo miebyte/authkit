@@ -47,9 +47,21 @@ type Repositories interface {
 	Sessions() SessionRepository
 }
 
+// AdminRepository is an optional capability of the existing Store. Callers do
+// not construct a second store; custom stores may implement this on the same value.
+type AdminRepository interface {
+	AdminOverview(context.Context, time.Time) (AdminOverview, error)
+	AdminListAccounts(context.Context, string, int, int, time.Time) (AdminAccountPage, error)
+	AdminGetAccount(context.Context, string, time.Time) (AdminAccountDetail, error)
+	AdminDeleteBinding(context.Context, string, string) error
+	AdminRevokeSession(context.Context, string, string) error
+	AdminRevokeAllSessions(context.Context, string) error
+}
+
 // Store runs a callback on one transaction, rolling back only for its returned error.
 type Store interface {
 	Repositories
+	AdminRepository
 	WithTransaction(context.Context, func(Repositories) error) error
 }
 

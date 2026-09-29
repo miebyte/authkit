@@ -68,21 +68,27 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 		if !old.Sent.IsZero() && now.Sub(old.Sent) < ResendInterval {
 			return ErrResendTooSoon
 		}
+
+		// 校验邮箱和IP的请求频率
 		if err = repos.Rates().Hit(ctx, digest("email:"+email), now, EmailRateLimit); err != nil {
 			return err
 		}
 		if err = repos.Rates().Hit(ctx, digest("ip:"+input.IP), now, IPRateLimit); err != nil {
 			return err
 		}
+		// 保存验证码
 		return repos.Challenges().Save(ctx, challenge)
 	})
 	if err != nil {
 		return err
 	}
-	if err = s.sender.SendCode(ctx, email, code); err != nil {
+
+	err = s.sender.SendCode(ctx, email, code)
+	if err != nil {
 		// Provider errors can contain message bodies or credentials.
 		return errors.Join(ErrMailFailed, ctx.Err())
 	}
+
 	return s.store.WithTransaction(ctx, func(repos Repositories) error {
 		current, err := repos.Challenges().Find(ctx, email)
 		if err != nil {
@@ -193,4 +199,8 @@ func (s *Service) runLogin(
 		return nil, outcome.Rejected
 	}
 	return outcome.Login, nil
+}
+
+func (s *Service) FindAccountByEmail(ctx context.Context, email string) (*Account, error) {
+	return s.store.Accounts().GetByEmail(ctx, email)
 }

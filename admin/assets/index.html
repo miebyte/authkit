@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7f7">
+    <title>AuthKit 超管后台</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <script src="assets/app.js" defer></script>
+  </head>
+  <body>
+    <div id="loading-screen" class="loading-screen" role="status">正在验证登录状态…</div>
+
+    <main id="login-screen" class="login-screen" hidden>
+      <section class="login-card" aria-labelledby="login-title">
+        <div class="brand brand-login"><span class="brand-mark">A</span><span>AuthKit <small>ADMIN</small></span></div>
+        <div class="login-heading">
+          <p class="eyebrow">管理员入口</p>
+          <h1 id="login-title">登录超管后台</h1>
+          <p>使用管理员邮箱接收验证码，安全访问账号与会话数据。</p>
+        </div>
+        <form id="login-form">
+          <label for="login-email">邮箱地址</label>
+          <div class="email-row">
+            <input id="login-email" name="email" type="email" autocomplete="email" placeholder="请输入管理员邮箱" required>
+            <button id="send-code" class="button button-secondary" type="button">发送验证码</button>
+          </div>
+          <label for="login-code">验证码</label>
+          <input id="login-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="输入 6 位验证码" required>
+          <p id="login-feedback" class="form-feedback" role="status" aria-live="polite"></p>
+          <button id="login-submit" class="button button-primary login-submit" type="submit">登录后台</button>
+        </form>
+        <p class="login-footnote">仅授权的超管账号可访问后台数据</p>
+      </section>
+    </main>
+
+    <div id="dashboard" class="dashboard" hidden>
+      <aside class="sidebar" aria-label="后台导航">
+        <div class="brand"><span class="brand-mark">A</span><span>AuthKit <small>ADMIN</small></span></div>
+        <nav class="side-nav" aria-label="页面区域">
+          <a href="#overview" class="nav-link active">概览</a>
+          <a href="#accounts" class="nav-link">账号管理</a>
+        </nav>
+        <div class="sidebar-account">
+          <span class="sidebar-account-label">当前管理员</span>
+          <strong id="admin-name">—</strong>
+        </div>
+      </aside>
+
+      <div class="main-area">
+        <header class="topbar">
+          <div class="topbar-title"><span class="topbar-dot"></span> 超管后台</div>
+          <div class="topbar-actions">
+            <button id="refresh-button" class="button button-quiet" type="button">刷新数据</button>
+            <button id="logout-button" class="button button-quiet" type="button">退出登录</button>
+          </div>
+        </header>
+
+        <main class="content">
+          <section id="overview" aria-labelledby="overview-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">总览</p><h1 id="overview-title">身份数据概览</h1></div>
+              <p>了解当前账号、绑定和有效会话的规模。</p>
+            </div>
+            <div class="metrics">
+              <article class="metric"><span>账号总数</span><strong id="metric-accounts">—</strong></article>
+              <article class="metric"><span>邮箱绑定</span><strong id="metric-email">—</strong></article>
+              <article class="metric"><span>微信绑定</span><strong id="metric-wechat">—</strong></article>
+              <article class="metric"><span>有效会话</span><strong id="metric-sessions">—</strong></article>
+            </div>
+          </section>
+
+          <section id="accounts" class="accounts-section" aria-labelledby="accounts-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">账号管理</p><h2 id="accounts-title">查找与管理账号</h2></div>
+              <p>查看绑定方式与有效会话，按需撤销登录状态。</p>
+            </div>
+            <div class="panel">
+              <form id="search-form" class="search-form" role="search">
+                <label for="account-query">搜索账号</label>
+                <div class="search-controls">
+                  <input id="account-query" type="search" placeholder="搜索账号 ID、用户名或邮箱" autocomplete="off">
+                  <button class="button button-primary" type="submit">查询</button>
+                </div>
+              </form>
+              <div class="table-toolbar"><span id="result-count">正在加载账号…</span><span class="page-size">每页 20 条</span><span class="table-hint">左右滑动查看完整表格</span></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th scope="col">账号</th><th scope="col">邮箱</th><th scope="col">微信</th><th scope="col">有效会话</th><th scope="col" class="action-heading">操作</th></tr></thead>
+                  <tbody id="account-rows"></tbody>
+                </table>
+              </div>
+              <div id="list-empty" class="empty-state" hidden></div>
+              <div class="pagination">
+                <span id="page-label">—</span>
+                <div><button id="prev-page" class="button button-secondary" type="button" disabled>上一页</button><button id="next-page" class="button button-secondary" type="button" disabled>下一页</button></div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="detail-title">
+      <div class="detail-shell">
+        <header class="detail-header"><div><p class="eyebrow">账号详情</p><h2 id="detail-title">账号</h2></div><button id="close-detail" class="icon-button" type="button" aria-label="关闭账号详情">×</button></header>
+        <div id="detail-content" class="detail-content"></div>
+      </div>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <form method="dialog">
+        <div class="confirm-icon" aria-hidden="true">!</div>
+        <h2 id="confirm-title">确认操作</h2>
+        <p id="confirm-message"></p>
+        <div class="confirm-actions"><button class="button button-secondary" value="cancel" type="submit">取消</button><button id="confirm-submit" class="button button-danger" value="confirm" type="submit">确认</button></div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

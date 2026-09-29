@@ -1,6 +1,6 @@
 # authkit
 
-`authkit` 是嵌入 Go 服务的身份模块，提供邮箱验证码登录、微信小程序登录、账号绑定和会话管理。宿主负责 HTTP 接口、邮件投递、注册准入和业务权限；模块不依赖特定 Web 框架。
+`authkit` 是嵌入 Go 服务的身份模块，提供邮箱验证码登录、微信小程序登录、账号绑定和会话管理。宿主负责业务 HTTP 接口、邮件投递、注册准入和业务权限；模块不依赖特定 Web 框架。可选的 `admin` 包提供内置超管后台页面。
 
 - 模块路径：`github.com/miebyte/authkit`
 - Go 版本：`1.27.1`（以 `go.mod` 为准）
@@ -17,7 +17,7 @@
 | 会话 | 创建、认证、退出单个会话；数据库仅保存 Token 摘要 |
 | 宿主事务 | 身份写入可与邀请消费、入组等宿主业务写入一起提交或回滚 |
 
-模块不提供路由、Cookie/Bearer 管理、邮件模板、邀请表、角色表或资源权限判断。`Authenticate` 只确认账号身份，业务授权仍由宿主处理。
+核心模块不提供业务路由、Cookie/Bearer 管理、邮件模板、邀请表、角色表或资源权限判断。`Authenticate` 只确认账号身份，业务授权仍由宿主处理。
 
 ## 接入 MySQL
 
@@ -120,6 +120,29 @@ login, err := service.BindEmail(ctx, currentToken, authkit.BindEmailInput{
 
 微信流程先在事务外调用 `ExchangeWechat`，再将返回的 `WechatIdentity` 传给 `Transaction.LoginWechat`，避免持锁期间请求微信接口。完整可编译示例见 [`examples/hosttx/login.go`](examples/hosttx/login.go)。`InTransaction` 本身不开启或提交事务。
 
+## 内置超管后台
+
+宿主先创建一个已有邮箱绑定的账号，再把它在 `auth_accounts` 中的 ID 作为配置传入。后台沿用邮箱验证码登录，不创建独立密码或超管角色表。所有管理 API 都在服务端用会话 Token 验证账号 ID；登录页面本身可公开访问。ID 为空或格式不符时，`NewHTTPHandler` 会报错；宿主可以选择不挂载后台。
+
+```go
+import (
+    "net/http"
+
+    "github.com/miebyte/authkit/admin"
+)
+
+// service 使用上文创建的实例；adminAccountID 从宿主配置读取。
+adminHandler, err := admin.NewHTTPHandler(service, adminAccountID)
+if err != nil { return err }
+mux := http.NewServeMux()
+mux.Handle("/ops/", http.StripPrefix("/ops", adminHandler))
+// 将 mux 挂到宿主 HTTP 服务后，访问 /ops/。
+```
+
+`http.Handler` 是 Go 接口，无需使用 `*http.Handler`。挂载路径由宿主决定；上例使用 `/ops/`。MySQL 管理查询使用 `service` 已持有的存储，不需要单独创建后台 Store。自定义存储可在同一个存储对象上实现可选的 `authkit.AdminRepository`；未实现时构造后台会返回 `ErrAdminUnavailable`。
+
+后台可查询账号、邮箱及微信绑定状态和有效会话；可解绑非超管账号的邮箱或微信凭据、撤销单个或全部会话。解绑会同时撤销该账号的全部会话，邮箱解绑还会清除待验证的邮箱验证码；不能移除最后一种登录方式。微信 OpenID 的摘要不会显示在页面或管理 API 中。后台不会自行迁移数据库，仍须由宿主执行 `authmysql.Models()` 迁移。建议通过 HTTPS 提供页面；浏览器仅在当前标签会话中保存管理 Token。
+
 ## 数据表与开发
 
 默认 Schema 包含 `auth_accounts`、`auth_bindings`、`auth_challenges`、`auth_rates`、`auth_sessions`。账号保存 ID 和可选的 `username`。邮箱和微信 OpenID 都记在 `auth_bindings` 里，用 `method` 区分。模型位于 [`mysql/models`](mysql/models)，宿主通过 `authmysql.Models()` 显式迁移。自定义存储除了实现 [`ports.go`](ports.go) 中的接口，还需满足其锁、唯一性、零值写入及事务语义。
@@ -129,4 +152,4 @@ make check        # go test ./... 和 go vet ./...
 make integration  # 启动一次性 MySQL，运行带 race 的集成测试
 ```
 
-`make integration` 需要本机安装 `mysqld`、`mysqladmin`。普通 `go test ./...` 在未设置 `AUTHKIT_MYSQL_DSN` 时跳过真实 MySQL 测试；也可以把该环境变量指向具有创建和删除测试数据库权限的专用 MySQL 实例，再运行 `go test -race -count=1 ./mysql/...`。
+`make integration` 需要本机安装 `mysqld`、`mysqladmin`，会运行 MySQL 与后台的集成测试。普通 `go test ./...` 在未设置 `AUTHKIT_MYSQL_DSN` 时跳过真实 MySQL 测试；也可以把该环境变量指向具有创建和删除测试数据库权限的专用 MySQL 实例，再运行 `go test -race -count=1 ./mysql/... ./admin/...`。
