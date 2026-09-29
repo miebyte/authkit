@@ -1,5 +1,5 @@
-// Package admin serves an optional, embedded super administrator console.
-// The host chooses the administrator by passing an existing auth_accounts ID.
+// Package admin 提供可选的内嵌超级管理员控制台。
+// 宿主通过传入已有的 auth_accounts ID 指定管理员。
 package admin
 
 import (
@@ -19,15 +19,14 @@ import (
 //go:embed assets/index.html assets/app.css assets/app.js
 var assets embed.FS
 
-// handler serves the console and its authenticated API relative to its mount path.
+// handler 按挂载路径提供控制台及其需认证的 API。
 type handler struct {
 	service *authkit.Service
 	adminID string
 	mux     *http.ServeMux
 }
 
-// NewHTTPHandler returns a console that can be mounted at any path. The host
-// selects an existing super administrator account by ID.
+// NewHTTPHandler 返回可挂载到任意路径的控制台。宿主通过 ID 选择已有的超级管理员账号。
 func NewHTTPHandler(service *authkit.Service, adminAccountID string) (http.Handler, error) {
 	if service == nil || !validID(adminAccountID) {
 		return nil, authkit.ErrInvalidInput
@@ -54,7 +53,7 @@ func NewHTTPHandler(service *authkit.Service, adminAccountID string) (http.Handl
 	return h, nil
 }
 
-// ServeHTTP implements http.Handler. Mount it under a prefix with http.StripPrefix.
+// ServeHTTP 实现 http.Handler。用 http.StripPrefix 把它挂到路径前缀下。
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
@@ -113,7 +112,7 @@ func (h *handler) sendCode(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.service.AdminAccountByEmail(r.Context(), email)
 	if errors.Is(err, authkit.ErrNotFound) || err == nil && (account == nil || account.ID != h.adminID) {
-		// Do not reveal which mailbox owns the administrator account.
+		// 不暴露哪个邮箱属于管理员账号。
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

@@ -12,10 +12,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// accountRepository persists accounts and their credential bindings.
+// accountRepository 持久化账号及其凭证绑定。
 type accountRepository struct{ db *gorm.DB }
 
-// GetByEmail returns the account bound to a normalized email address.
+// GetByEmail 返回绑定到规范化邮箱地址的账号。
 func (r *accountRepository) GetByEmail(
 	ctx context.Context,
 	email string,
@@ -30,18 +30,12 @@ func (r *accountRepository) GetByEmail(
 	return r.findAccount(ctx, *binding.AccountID, false)
 }
 
-// GetByID locks an account before changing its bindings.
-func (r *accountRepository) GetByID(ctx context.Context, id string) (*authkit.Account, error) {
-	return r.findAccount(ctx, id, true)
-}
-
-// GetByWechat locks an OpenID even when it has no owner yet.
+// GetByWechat 即使 OpenID 尚无所有者也会锁定它。
 func (r *accountRepository) GetByWechat(
 	ctx context.Context,
 	openIDHash string,
 ) (*authkit.Account, error) {
-	// Updating the key to itself takes an exclusive lock immediately, avoiding
-	// shared-lock upgrades when concurrent first logins find the same OpenID.
+	// 把键更新为自身会立即取得排他锁，避免并发的首次登录命中同一 OpenID 时升级共享锁。
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		DoUpdates: clause.AssignmentColumns([]string{"method"}),
 	}).Create(&models.Binding{
@@ -59,37 +53,19 @@ func (r *accountRepository) GetByWechat(
 	return r.findAccount(ctx, *binding.AccountID, true)
 }
 
-// BindWechat assigns a locked OpenID once. One account keeps a single WeChat credential.
-func (r *accountRepository) BindWechat(ctx context.Context, openIDHash, accountID string) error {
-	return r.bind(ctx, authkit.MethodWechat, openIDHash, accountID)
-}
-
-// HasWechat reports whether the account has an OpenID binding.
-func (r *accountRepository) HasWechat(ctx context.Context, accountID string) (bool, error) {
-	var count int64
-	err := r.db.WithContext(ctx).Model(&models.Binding{}).
-		Where("account_id = ? AND method = ?", accountID, authkit.MethodWechat).
-		Count(&count).Error
-	return count > 0, mapError(err)
-}
-
-// BindEmail assigns an unused mailbox only to an account without an email.
-func (r *accountRepository) BindEmail(ctx context.Context, accountID, email string) error {
-	return r.bind(ctx, authkit.MethodEmail, email, accountID)
-}
-
-// Create inserts an account and its mailbox binding when an email is present.
-func (r *accountRepository) Create(ctx context.Context, account *authkit.Account) error {
+// Create 插入账号及其初始登录凭证。
+func (r *accountRepository) Create(
+	ctx context.Context,
+	account *authkit.Account,
+	credential authkit.Credential,
+) error {
 	if err := mapError(r.db.WithContext(ctx).Create(accountModel(account)).Error); err != nil {
 		return err
 	}
-	if account.Email == "" {
-		return nil
-	}
-	return r.BindEmail(ctx, account.ID, account.Email)
+	return r.createCredential(ctx, account.ID, credential)
 }
 
-// GetBySessionToken returns an account only while its matching session is live.
+// GetBySessionToken 仅在匹配会话仍然有效时返回账号。
 func (r *accountRepository) GetBySessionToken(
 	ctx context.Context,
 	hash string,
@@ -106,7 +82,7 @@ func (r *accountRepository) GetBySessionToken(
 	return r.withEmail(ctx, &m)
 }
 
-// findAccount loads an account, optionally locking the row before a binding change.
+// findAccount 加载账号，并可以在修改绑定前锁定该行。
 func (r *accountRepository) findAccount(
 	ctx context.Context,
 	id string,
@@ -123,7 +99,7 @@ func (r *accountRepository) findAccount(
 	return r.withEmail(ctx, &m)
 }
 
-// findBinding loads one credential, optionally locking it.
+// findBinding 加载一条凭证，并可以锁定它。
 func (r *accountRepository) findBinding(
 	ctx context.Context,
 	method, identifier string,
@@ -140,7 +116,7 @@ func (r *accountRepository) findBinding(
 	return &binding, nil
 }
 
-// accountModel maps the public account onto its row. An empty username is stored as NULL.
+// accountModel 把公开账号映射为数据行。空用户名存为 NULL。
 func accountModel(account *authkit.Account) *models.Account {
 	m := &models.Account{ID: account.ID}
 	if account.Username != "" {
@@ -150,7 +126,7 @@ func accountModel(account *authkit.Account) *models.Account {
 	return m
 }
 
-// withEmail fills the mailbox projection from the account's email binding.
+// withEmail 用账号的邮箱绑定填充邮箱投影。
 func (r *accountRepository) withEmail(
 	ctx context.Context,
 	account *models.Account,
@@ -168,60 +144,34 @@ func (r *accountRepository) withEmail(
 	return mapper.AccountToDomain(account, binding.Identifier), nil
 }
 
-// bind claims an unbound credential or inserts one. Indexes keep each credential unique
-// and each account limited to one credential of a method.
-func (r *accountRepository) bind(ctx context.Context, method, identifier, accountID string) error {
+// createCredential 写入新账号的初始凭证，并认领查询微信身份时创建的锁定占位。
+func (r *accountRepository) createCredential(
+	ctx context.Context,
+	accountID string,
+	credential authkit.Credential,
+) error {
 	res := r.db.WithContext(ctx).Model(&models.Binding{}).
-		Where("method = ? AND identifier = ? AND account_id IS NULL", method, identifier).
+		Where(
+			"method = ? AND identifier = ? AND account_id IS NULL",
+			credential.Method,
+			credential.Identifier,
+		).
 		Update("account_id", accountID)
-	if err := bindingConflict(method, res.Error); err != nil {
-		return err
-	}
 	if res.Error != nil {
 		return mapError(res.Error)
 	}
 	if res.RowsAffected == 1 {
 		return nil
 	}
-	if method == authkit.MethodWechat {
-		return authkit.ErrWechatBound
-	}
-	err := r.db.WithContext(ctx).Create(&models.Binding{
-		Method: method, Identifier: identifier, AccountID: &accountID,
-	}).Error
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(mapError(err), authkit.ErrConflict) {
-		return mapError(err)
-	}
-	var count int64
-	if countErr := r.db.WithContext(ctx).Model(&models.Binding{}).
-		Where("account_id = ? AND method = ?", accountID, method).
-		Count(&count).Error; countErr != nil {
-		return mapError(countErr)
-	}
-	if count > 0 {
-		return authkit.ErrEmailBound
-	}
-	return authkit.ErrEmailAccountConflict
+	return mapError(r.db.WithContext(ctx).Create(&models.Binding{
+		Method: credential.Method, Identifier: credential.Identifier, AccountID: &accountID,
+	}).Error)
 }
 
-// bindingConflict maps a uniqueness failure onto the credential's public error.
-func bindingConflict(method string, err error) error {
-	if !errors.Is(mapError(err), authkit.ErrConflict) {
-		return nil
-	}
-	if method == authkit.MethodWechat {
-		return authkit.ErrWechatBound
-	}
-	return authkit.ErrEmailAccountConflict
-}
-
-// challengeRepository serializes every issuance and verification by mailbox.
+// challengeRepository 按邮箱串行化每一次签发和校验。
 type challengeRepository struct{ db *gorm.DB }
 
-// Get locks the mailbox, inserting an unready placeholder if it has no code.
+// Get 锁定邮箱；尚无验证码时插入一条未就绪的占位记录。
 func (r *challengeRepository) Get(ctx context.Context, email string) (*authkit.Challenge, error) {
 	epoch := time.Unix(0, 0).UTC()
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
@@ -232,7 +182,7 @@ func (r *challengeRepository) Get(ctx context.Context, email string) (*authkit.C
 	return r.Find(ctx, email)
 }
 
-// Find locks an existing challenge without allocating rows for unknown mailboxes.
+// Find 锁定已有验证挑战，不为未知邮箱分配行。
 func (r *challengeRepository) Find(ctx context.Context, email string) (*authkit.Challenge, error) {
 	var m models.Challenge
 	if err := r.db.WithContext(ctx).
@@ -244,7 +194,7 @@ func (r *challengeRepository) Find(ctx context.Context, email string) (*authkit.
 	return mapper.ChallengeModelToDomain(&m), nil
 }
 
-// Save explicitly writes zero and false values while retaining the locked row.
+// Save 显式写入零值和 false，同时保留已锁定的行。
 func (r *challengeRepository) Save(ctx context.Context, c *authkit.Challenge) error {
 	return mapError(r.db.WithContext(ctx).Model(&models.Challenge{}).
 		Where("email = ?", c.Email).Updates(map[string]any{
@@ -254,10 +204,10 @@ func (r *challengeRepository) Save(ctx context.Context, c *authkit.Challenge) er
 	}).Error)
 }
 
-// rateRepository counts send attempts within a fixed hourly window.
+// rateRepository 在固定的小时窗口内统计发送次数。
 type rateRepository struct{ db *gorm.DB }
 
-// Hit atomically checks and increments a rate bucket within its transaction.
+// Hit 在所属事务内原子地检查并递增一个限流桶。
 func (r *rateRepository) Hit(ctx context.Context, id string, now time.Time, limit int) error {
 	now = now.UTC()
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
@@ -284,15 +234,15 @@ func (r *rateRepository) Hit(ctx context.Context, id string, now time.Time, limi
 		Updates(map[string]any{"starts": m.Starts, "hits": m.Hits + 1}).Error)
 }
 
-// sessionRepository persists and revokes application session digests.
+// sessionRepository 持久化并撤销应用会话摘要。
 type sessionRepository struct{ db *gorm.DB }
 
-// Create inserts a session without persisting its plaintext credential.
+// Create 插入会话，不持久化明文凭证。
 func (r *sessionRepository) Create(ctx context.Context, s *authkit.Session) error {
 	return mapError(r.db.WithContext(ctx).Create(mapper.SessionDomainToModel(s)).Error)
 }
 
-// Delete revokes a session and also succeeds when it has already been revoked.
+// Delete 撤销会话；会话已经撤销时同样成功。
 func (r *sessionRepository) Delete(ctx context.Context, hash string) error {
 	return mapError(r.db.WithContext(ctx).Where("hash = ?", hash).
 		Delete(&models.Session{}).Error)

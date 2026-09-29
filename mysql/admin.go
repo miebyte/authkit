@@ -13,7 +13,7 @@ import (
 
 var _ authkit.AdminRepository = (*Store)(nil)
 
-// AdminOverview counts accounts, owned bindings and unexpired sessions.
+// AdminOverview 统计账号、已归属的绑定和未过期会话。
 func (s *Store) AdminOverview(ctx context.Context, now time.Time) (authkit.AdminOverview, error) {
 	var result authkit.AdminOverview
 	if err := s.db.WithContext(ctx).Model(&models.Account{}).Count(&result.Accounts).Error; err != nil {
@@ -36,7 +36,7 @@ func (s *Store) AdminOverview(ctx context.Context, now time.Time) (authkit.Admin
 	return result, nil
 }
 
-// AdminListAccounts searches account IDs, usernames and bound email addresses.
+// AdminListAccounts 按账号 ID、用户名和已绑定邮箱搜索。
 func (s *Store) AdminListAccounts(
 	ctx context.Context, search string, page, limit int, now time.Time,
 ) (authkit.AdminAccountPage, error) {
@@ -71,7 +71,7 @@ func (s *Store) AdminListAccounts(
 	return result, nil
 }
 
-// AdminGetAccount loads an account's credentials and live sessions.
+// AdminGetAccount 加载账号的凭证和有效会话。
 func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (authkit.AdminAccountDetail, error) {
 	if strings.TrimSpace(id) == "" {
 		return authkit.AdminAccountDetail{}, authkit.ErrInvalidInput
@@ -108,7 +108,7 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 	return result, nil
 }
 
-// AdminDeleteBinding removes one credential while preserving a way to log in.
+// AdminDeleteBinding 移除一条凭证，同时保留至少一种登录方式。
 func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string) error {
 	if strings.TrimSpace(accountID) == "" ||
 		(method != authkit.MethodEmail && method != authkit.MethodWechat) {
@@ -151,7 +151,7 @@ func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string
 	}))
 }
 
-// AdminRevokeSession removes only a session belonging to the specified account.
+// AdminRevokeSession 只移除属于指定账号的会话。
 func (s *Store) AdminRevokeSession(ctx context.Context, accountID, hash string) error {
 	if strings.TrimSpace(accountID) == "" || strings.TrimSpace(hash) == "" {
 		return authkit.ErrInvalidInput
@@ -167,7 +167,7 @@ func (s *Store) AdminRevokeSession(ctx context.Context, accountID, hash string) 
 	return nil
 }
 
-// AdminRevokeAllSessions removes every session for one account.
+// AdminRevokeAllSessions 移除一个账号的全部会话。
 func (s *Store) AdminRevokeAllSessions(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(accountID) == "" {
 		return authkit.ErrInvalidInput

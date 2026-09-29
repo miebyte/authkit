@@ -1,5 +1,5 @@
-// Package authmysql adapts authkit repositories to a host-owned MySQL GORM connection.
-// The host owns migrations, connection lifecycle and HTTP behavior.
+// Package authmysql 把 authkit 仓储适配到宿主拥有的 MySQL GORM 连接。
+// 宿主负责迁移、连接生命周期和 HTTP 行为。
 package authmysql
 
 import (
@@ -13,14 +13,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// Store provides MySQL repositories and read-committed identity transactions.
+// Store 提供 MySQL 仓储和读已提交的身份事务。
 type Store struct {
 	db *gorm.DB
 }
 
 var _ authkit.Store = (*Store)(nil)
 
-// NewStore wraps an existing host connection without connecting or migrating.
+// NewStore 包装宿主已有的连接，不负责建连或迁移。
 func NewStore(db *gorm.DB) (*Store, error) {
 	if db == nil || db.Config == nil || db.Dialector == nil || db.Dialector.Name() != "mysql" {
 		return nil, authkit.ErrInvalidInput
@@ -31,35 +31,34 @@ func NewStore(db *gorm.DB) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// Bind attaches repositories to a valid host-owned transaction. The host must use
-// read-committed isolation, commit verification rejections and roll back errors.
+// Bind 把仓储挂到有效的宿主事务上。宿主必须使用读已提交隔离级别，提交验证拒绝，并在出错时回滚。
 func Bind(tx *gorm.DB) authkit.Store {
 	return &Store{db: tx}
 }
 
-// Models returns the schema for an explicit host db.AutoMigrate(Models()...) call.
+// Models 返回表结构，供宿主显式调用 db.AutoMigrate(Models()...)。
 func Models() []any { return models.AllModels() }
 
-// WithTransaction binds every repository to the same read-committed transaction.
+// WithTransaction 把全部仓储绑定到同一个读已提交事务。
 func (s *Store) WithTransaction(ctx context.Context, fn func(authkit.Repositories) error) error {
 	return mapError(s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return fn(Bind(tx))
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted}))
 }
 
-// Accounts returns the account and credential-binding repository.
+// Accounts 返回账号与凭证绑定仓储。
 func (s *Store) Accounts() authkit.AccountRepository { return &accountRepository{db: s.db} }
 
-// Challenges returns the mailbox challenge repository.
+// Challenges 返回邮箱验证挑战仓储。
 func (s *Store) Challenges() authkit.ChallengeRepository { return &challengeRepository{db: s.db} }
 
-// Rates returns the code send-rate repository.
+// Rates 返回验证码发送频率仓储。
 func (s *Store) Rates() authkit.RateRepository { return &rateRepository{db: s.db} }
 
-// Sessions returns the application session repository.
+// Sessions 返回应用会话仓储。
 func (s *Store) Sessions() authkit.SessionRepository { return &sessionRepository{db: s.db} }
 
-// mapError preserves host errors and maps portable lookup and uniqueness failures.
+// mapError 保留宿主错误，并把可移植的查找失败和唯一约束失败映射为模块错误。
 func mapError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return authkit.ErrNotFound

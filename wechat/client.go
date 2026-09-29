@@ -1,4 +1,4 @@
-// Package wechat exchanges WeChat mini-program login codes for server-verified identities.
+// Package wechat 把微信小程序登录 code 换取为经服务端核验的身份。
 package wechat
 
 import (
@@ -19,16 +19,16 @@ const (
 	maxResponseBytes = 8192
 )
 
-// Config holds server-side mini-program credentials; never send it to clients.
+// Config 保存服务端小程序凭证；绝不能下发给客户端。
 type Config struct {
 	AppID  string `json:"app_id"`
 	Secret string `json:"secret"`
 }
 
-// Enabled reports whether both credentials are present; Validate checks their format.
+// Enabled 报告两项凭证是否都已提供；Validate 检查它们的格式。
 func (c Config) Enabled() bool { return c.AppID != "" && c.Secret != "" }
 
-// Validate accepts a disabled integration and rejects incomplete credentials.
+// Validate 接受未启用的集成，并拒绝不完整的凭证。
 func (c Config) Validate() error {
 	if c.AppID == "" && c.Secret == "" {
 		return nil
@@ -42,7 +42,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// Client uses a bounded HTTP exchange and returns no provider credential material.
+// Client 使用有界的 HTTP 换取，并且不返回服务商凭证材料。
 type Client struct {
 	config   Config
 	http     *http.Client
@@ -51,8 +51,8 @@ type Client struct {
 
 var _ authkit.WechatExchanger = (*Client)(nil)
 
-// New validates a configured integration and creates an eight-second HTTP client.
-// A host disabling WeChat should inject a nil exchanger instead.
+// New 校验已配置的集成，并创建超时为八秒的 HTTP 客户端。
+// 宿主关闭微信时应注入 nil 交换器，而不是构造未启用的客户端。
 func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -66,8 +66,8 @@ func New(config Config) (*Client, error) {
 	}}, nil
 }
 
-// ExchangeCode verifies a temporary wx.login code before a host opens a transaction.
-// Raw HTTP errors and response bodies may contain credentials and are never returned.
+// ExchangeCode 在宿主开启事务之前核验临时的 wx.login code。
+// 原始 HTTP 错误和响应体可能包含凭证，因此绝不返回。
 func (c *Client) ExchangeCode(ctx context.Context, code string) (authkit.WechatIdentity, error) {
 	if strings.TrimSpace(code) == "" || len(code) > 512 {
 		return authkit.WechatIdentity{}, authkit.ErrWechatCode
@@ -88,7 +88,7 @@ func (c *Client) ExchangeCode(ctx context.Context, code string) (authkit.WechatI
 	if resp.StatusCode != http.StatusOK {
 		return authkit.WechatIdentity{}, authkit.ErrWechatLogin
 	}
-	// Reading one extra byte detects an oversized body even when it begins with valid JSON.
+	// 多读一个字节，以便在正文以合法 JSON 开头时仍能发现超长内容。
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return authkit.WechatIdentity{}, exchangeError(ctx)
@@ -117,7 +117,7 @@ func (c *Client) ExchangeCode(ctx context.Context, code string) (authkit.WechatI
 	}
 }
 
-// exchangeError preserves caller cancellation without retaining secret-bearing URL errors.
+// exchangeError 保留调用方取消，且不保留可能携带密钥的 URL 错误。
 func exchangeError(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return errors.Join(authkit.ErrWechatLogin, err)

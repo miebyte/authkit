@@ -1,13 +1,12 @@
-// Package api demonstrates the JSON HTTP contract a host can place in front of authkit.
+// Package api 演示宿主可以放在 authkit 前面的 JSON HTTP 约定。
 //
 //	POST   /auth/email/codes    {"email"}
 //	POST   /auth/email/login    {"email","code"}
-//	POST   /auth/wechat/login   {"code","email?","email_code?"}
-//	POST   /auth/email/bind     Authorization: Bearer, {"email","code"}
+//	POST   /auth/wechat/login   {"code"}
 //	GET    /auth/session        Authorization: Bearer
 //	DELETE /auth/session        Authorization: Bearer
 //
-// Login and bind responses use the session object. Failures use {"error":"..."}.
+// 登录响应使用 session 对象。失败响应使用 {"error":"..."}。
 package api
 
 import (
@@ -18,27 +17,26 @@ import (
 	"github.com/miebyte/authkit"
 )
 
-// Handler serves the authkit HTTP API on a host-owned mux.
+// Handler 在宿主拥有的 mux 上提供 authkit HTTP API。
 type Handler struct {
 	service *authkit.Service
 }
 
-// NewHandler requires the identity service the routes call.
+// NewHandler 需要路由所调用的身份服务。
 func NewHandler(service *authkit.Service) *Handler {
 	return &Handler{service: service}
 }
 
-// Register attaches every auth route. Paths are rooted at /auth.
+// Register 注册全部认证路由。路径以 /auth 为根。
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/email/codes", h.sendEmailCode)
 	mux.HandleFunc("POST /auth/email/login", h.loginEmail)
 	mux.HandleFunc("POST /auth/wechat/login", h.loginWechat)
-	mux.HandleFunc("POST /auth/email/bind", h.bindEmail)
 	mux.HandleFunc("GET /auth/session", h.session)
 	mux.HandleFunc("DELETE /auth/session", h.logout)
 }
 
-// sendEmailCode accepts {"email"} and responds 204 after delivery.
+// sendEmailCode 接受 {"email"}，投递完成后返回 204。
 func (h *Handler) sendEmailCode(w http.ResponseWriter, r *http.Request) {
 	var body sendCodeRequest
 	if err := decodeJSON(w, r, &body); err != nil {
@@ -56,7 +54,7 @@ func (h *Handler) sendEmailCode(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// loginEmail accepts {"email","code"} and returns a session.
+// loginEmail 接受 {"email","code"} 并返回会话。
 func (h *Handler) loginEmail(w http.ResponseWriter, r *http.Request) {
 	var body emailLoginRequest
 	if err := decodeJSON(w, r, &body); err != nil {
@@ -74,17 +72,14 @@ func (h *Handler) loginEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionFrom(result))
 }
 
-// loginWechat accepts {"code","email?","email_code?"} and returns a session.
+// loginWechat 接受 {"code"} 并返回会话。
 func (h *Handler) loginWechat(w http.ResponseWriter, r *http.Request) {
 	var body wechatLoginRequest
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
-	result, err := h.service.LoginWechat(r.Context(), body.Code, authkit.WechatLoginInput{
-		Email:     body.Email,
-		EmailCode: body.EmailCode,
-	})
+	result, err := h.service.LoginWechat(r.Context(), body.Code)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -92,30 +87,7 @@ func (h *Handler) loginWechat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionFrom(result))
 }
 
-// bindEmail accepts a bearer token and {"email","code"}, then returns the rotated session.
-func (h *Handler) bindEmail(w http.ResponseWriter, r *http.Request) {
-	token := bearerToken(r)
-	if token == "" {
-		writeError(w, authkit.ErrUnauthorized)
-		return
-	}
-	var body bindEmailRequest
-	if err := decodeJSON(w, r, &body); err != nil {
-		writeError(w, err)
-		return
-	}
-	result, err := h.service.BindEmail(r.Context(), token, authkit.BindEmailInput{
-		Email: body.Email,
-		Code:  body.Code,
-	})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sessionFrom(result))
-}
-
-// session returns the account for the bearer token.
+// session 返回 Bearer 令牌对应的账号。
 func (h *Handler) session(w http.ResponseWriter, r *http.Request) {
 	account, err := h.service.Authenticate(r.Context(), bearerToken(r))
 	if err != nil {
@@ -125,7 +97,7 @@ func (h *Handler) session(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, accountFrom(*account))
 }
 
-// logout revokes the bearer token and responds 204.
+// logout 撤销 Bearer 令牌并返回 204。
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.Logout(r.Context(), bearerToken(r)); err != nil {
 		writeError(w, err)
@@ -134,7 +106,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// bearerToken reads the credential from Authorization: Bearer.
+// bearerToken 从 Authorization: Bearer 读取凭证。
 func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
 	value := r.Header.Get("Authorization")
@@ -144,7 +116,7 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(value, prefix))
 }
 
-// clientIP uses the connection address. A host behind a trusted proxy should replace it.
+// clientIP 使用连接地址。位于可信代理之后的宿主应替换该实现。
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

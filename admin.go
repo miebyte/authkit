@@ -7,13 +7,13 @@ import (
 )
 
 var (
-	// ErrAdminUnavailable means the service's store does not support administration.
+	// ErrAdminUnavailable 表示服务的存储不支持管理能力。
 	ErrAdminUnavailable = errors.New("authkit: admin backend unavailable")
-	// ErrLastBinding prevents an account from losing its final login method.
+	// ErrLastBinding 防止账号失去最后一种登录方式。
 	ErrLastBinding = errors.New("authkit: cannot remove the last binding")
 )
 
-// AdminOverview contains counts for the administrator dashboard.
+// AdminOverview 包含管理后台的统计计数。
 type AdminOverview struct {
 	Accounts       int64 `json:"accounts"`
 	EmailBindings  int64 `json:"email_bindings"`
@@ -21,7 +21,7 @@ type AdminOverview struct {
 	ActiveSessions int64 `json:"active_sessions"`
 }
 
-// AdminAccountSummary is the account list projection.
+// AdminAccountSummary 是账号列表的投影。
 type AdminAccountSummary struct {
 	ID             string `json:"id"`
 	Username       string `json:"username"`
@@ -30,7 +30,7 @@ type AdminAccountSummary struct {
 	ActiveSessions int64  `json:"active_sessions"`
 }
 
-// AdminAccountPage is one page of matching accounts.
+// AdminAccountPage 是匹配账号的一页结果。
 type AdminAccountPage struct {
 	Items []AdminAccountSummary `json:"items"`
 	Total int64                 `json:"total"`
@@ -38,19 +38,19 @@ type AdminAccountPage struct {
 	Limit int                   `json:"limit"`
 }
 
-// AdminBindingInfo describes one login method. WeChat identifiers are withheld.
+// AdminBindingInfo 描述一种登录方式。微信标识会被隐藏。
 type AdminBindingInfo struct {
 	Method     string `json:"method"`
 	Identifier string `json:"identifier"`
 }
 
-// AdminSessionInfo describes one live session by its stored digest.
+// AdminSessionInfo 用已存储的摘要描述一个有效会话。
 type AdminSessionInfo struct {
 	ID      string    `json:"id"`
 	Expires time.Time `json:"expires"`
 }
 
-// AdminAccountDetail contains one account's bindings and live sessions.
+// AdminAccountDetail 包含一个账号的绑定和有效会话。
 type AdminAccountDetail struct {
 	ID       string             `json:"id"`
 	Username string             `json:"username"`
@@ -63,8 +63,7 @@ func (s *Service) adminRepository() (AdminRepository, error) {
 	return s.store, nil
 }
 
-// AdminAccountByEmail resolves an existing mailbox account. The caller must
-// enforce administrator authorization before exposing the result.
+// AdminAccountByEmail 解析已存在的邮箱账号。调用方在暴露结果前必须完成管理员鉴权。
 func (s *Service) AdminAccountByEmail(ctx context.Context, email string) (*Account, error) {
 	email, err := NormalizeEmail(email)
 	if err != nil {
@@ -73,7 +72,7 @@ func (s *Service) AdminAccountByEmail(ctx context.Context, email string) (*Accou
 	return s.store.Accounts().GetByEmail(ctx, email)
 }
 
-// AdminOverview returns live identity counts; callers must enforce admin authorization.
+// AdminOverview 返回当前身份计数；调用方必须完成管理员鉴权。
 func (s *Service) AdminOverview(ctx context.Context) (AdminOverview, error) {
 	repo, err := s.adminRepository()
 	if err != nil {
@@ -82,7 +81,7 @@ func (s *Service) AdminOverview(ctx context.Context) (AdminOverview, error) {
 	return repo.AdminOverview(ctx, s.now().UTC())
 }
 
-// AdminListAccounts searches accounts; callers must enforce admin authorization.
+// AdminListAccounts 搜索账号；调用方必须完成管理员鉴权。
 func (s *Service) AdminListAccounts(ctx context.Context, query string, page, limit int) (AdminAccountPage, error) {
 	repo, err := s.adminRepository()
 	if err != nil {
@@ -91,7 +90,7 @@ func (s *Service) AdminListAccounts(ctx context.Context, query string, page, lim
 	return repo.AdminListAccounts(ctx, query, page, limit, s.now().UTC())
 }
 
-// AdminGetAccount loads bindings and live sessions; callers must enforce admin authorization.
+// AdminGetAccount 加载绑定和有效会话；调用方必须完成管理员鉴权。
 func (s *Service) AdminGetAccount(ctx context.Context, id string) (AdminAccountDetail, error) {
 	repo, err := s.adminRepository()
 	if err != nil {
@@ -100,7 +99,7 @@ func (s *Service) AdminGetAccount(ctx context.Context, id string) (AdminAccountD
 	return repo.AdminGetAccount(ctx, id, s.now().UTC())
 }
 
-// AdminDeleteBinding removes a login method; callers must enforce admin authorization.
+// AdminDeleteBinding 移除一种登录方式；调用方必须完成管理员鉴权。
 func (s *Service) AdminDeleteBinding(ctx context.Context, id, method string) error {
 	repo, err := s.adminRepository()
 	if err != nil {
@@ -109,7 +108,7 @@ func (s *Service) AdminDeleteBinding(ctx context.Context, id, method string) err
 	return repo.AdminDeleteBinding(ctx, id, method)
 }
 
-// AdminRevokeSession removes one session; callers must enforce admin authorization.
+// AdminRevokeSession 移除一个会话；调用方必须完成管理员鉴权。
 func (s *Service) AdminRevokeSession(ctx context.Context, id, hash string) error {
 	repo, err := s.adminRepository()
 	if err != nil {
@@ -118,7 +117,7 @@ func (s *Service) AdminRevokeSession(ctx context.Context, id, hash string) error
 	return repo.AdminRevokeSession(ctx, id, hash)
 }
 
-// AdminRevokeAllSessions removes an account's sessions; callers must enforce admin authorization.
+// AdminRevokeAllSessions 移除账号的全部会话；调用方必须完成管理员鉴权。
 func (s *Service) AdminRevokeAllSessions(ctx context.Context, id string) error {
 	repo, err := s.adminRepository()
 	if err != nil {

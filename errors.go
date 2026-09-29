@@ -2,7 +2,7 @@ package authkit
 
 import "errors"
 
-// Stable errors can be matched with errors.Is and mapped to the host's HTTP contract.
+// 这些稳定错误可用 errors.Is 匹配，并映射到宿主的 HTTP 约定。
 var (
 	ErrInvalidInput       = errors.New("authkit: invalid input")
 	ErrInvalidEmail       = errors.New("authkit: invalid email")
@@ -19,10 +19,4 @@ var (
 	ErrWechatUnavailable  = errors.New("authkit: WeChat login is not configured")
 	ErrWechatLogin        = errors.New("authkit: WeChat exchange failed")
 	ErrWechatCode         = errors.New("authkit: invalid WeChat code")
-	ErrWechatBound        = errors.New(
-		"authkit: account already has a WeChat identity for this application",
-	)
-	ErrEmailAccountConflict = errors.New("authkit: email belongs to another account")
-	ErrEmailBound           = errors.New("authkit: account already has an email")
-	ErrWechatRequired       = errors.New("authkit: account requires a WeChat identity")
 )

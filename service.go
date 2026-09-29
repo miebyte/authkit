@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Service orchestrates standalone identity transactions and code delivery.
-// Use InTransaction when identity and host business writes must commit together.
+// Service 编排独立的身份事务和验证码投递。
+// 身份写入必须与宿主业务写入一起提交时，使用 InTransaction。
 type Service struct {
 	store        Store
 	sender       CodeSender
@@ -16,8 +16,7 @@ type Service struct {
 	now          func() time.Time
 }
 
-// NewService validates required dependencies. A nil WechatExchanger disables
-// WeChat exchange; a nil RegistrationPolicy denies creation but permits login.
+// NewService 校验必需依赖。WechatExchanger 为 nil 时关闭微信换取；RegistrationPolicy 为 nil 时拒绝创建账号，但允许登录。
 func NewService(
 	store Store,
 	sender CodeSender,
@@ -36,15 +35,14 @@ func NewService(
 	}, nil
 }
 
-// InTransaction binds identity operations to repositories already inside a host
-// transaction. It never begins or commits a transaction. The supplied policy
-// replaces the standalone policy and must use the same host transaction for writes.
+// InTransaction 把身份操作绑定到已经处于宿主事务中的仓储。
+// 它不会开启或提交事务。传入的策略会替换独立策略，其写入必须使用同一个宿主事务。
 func (s *Service) InTransaction(repos Repositories, policy RegistrationPolicy) *Transaction {
 	return &Transaction{repos: repos, registration: policy, now: s.now}
 }
 
-// SendCode persists a pending code, sends outside the transaction, then activates
-// only the same code. Failed delivery leaves the code unusable and retains limits.
+// SendCode 先持久化待发送验证码，在事务外发送，再只激活同一条验证码。
+// 投递失败会使验证码不可用，并保留限流计数。
 func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	email, err := NormalizeEmail(input.Email)
 	if err != nil {
@@ -54,7 +52,7 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	if err != nil {
 		return err
 	}
-	// MySQL persists microseconds; compare issuance time after the storage round trip.
+	// MySQL 以微秒持久化时间；比较签发时间需要经过存储往返。
 	now := s.now().UTC().Truncate(time.Microsecond)
 	challenge := &Challenge{
 		Email: email, Hash: digest(email + code),
@@ -85,7 +83,7 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 
 	err = s.sender.SendCode(ctx, email, code)
 	if err != nil {
-		// Provider errors can contain message bodies or credentials.
+		// 服务商错误可能包含报文正文或凭证。
 		return errors.Join(ErrMailFailed, ctx.Err())
 	}
 
@@ -102,7 +100,7 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	})
 }
 
-// LoginEmail verifies a mailbox and logs in or creates an admitted account.
+// LoginEmail 核验邮箱，并登录或创建已准入的账号。
 func (s *Service) LoginEmail(ctx context.Context, input EmailLoginInput) (*LoginResult, error) {
 	login, err := emailCodeLogin(input)
 	if err != nil {
@@ -111,15 +109,15 @@ func (s *Service) LoginEmail(ctx context.Context, input EmailLoginInput) (*Login
 	return s.loginCode(ctx, login)
 }
 
-// loginCode verifies one code target and logs in or creates an admitted account.
+// loginCode 核验一个验证码目标，并登录或创建已准入的账号。
 func (s *Service) loginCode(ctx context.Context, input codeLogin) (*LoginResult, error) {
 	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
 		return tx.loginCode(ctx, input)
 	})
 }
 
-// ExchangeWechat verifies a provider code without opening a database transaction.
-// Hosts may call this before starting their own transaction and then use Transaction.LoginWechat.
+// ExchangeWechat 在不开启数据库事务的情况下核验服务商 code。
+// 宿主可以先调用它，再开启自己的事务，然后使用 Transaction.LoginWechat。
 func (s *Service) ExchangeWechat(ctx context.Context, code string) (WechatIdentity, error) {
 	if s.wechat == nil {
 		return WechatIdentity{}, ErrWechatUnavailable
@@ -137,43 +135,29 @@ func (s *Service) ExchangeWechat(ctx context.Context, code string) (WechatIdenti
 	return identity, nil
 }
 
-// LoginWechat exchanges the provider code before atomically binding or registering.
+// LoginWechat 在原子地绑定或注册之前先换取服务商 code。
 func (s *Service) LoginWechat(
 	ctx context.Context,
 	code string,
-	input WechatLoginInput,
 ) (*LoginResult, error) {
-	if _, err := normalizeWechatInput(input); err != nil {
-		return nil, err
-	}
 	subject, err := s.ExchangeWechat(ctx, code)
 	if err != nil {
 		return nil, err
 	}
 	return s.runLogin(
 		ctx,
-		func(tx *Transaction) (Outcome, error) { return tx.LoginWechat(ctx, subject, input) },
+		func(tx *Transaction) (Outcome, error) {
+			return tx.LoginWechat(ctx, subject)
+		},
 	)
 }
 
-// BindEmail adds a verified mailbox and rotates only the supplied live session.
-func (s *Service) BindEmail(
-	ctx context.Context,
-	currentToken string,
-	input BindEmailInput,
-) (*LoginResult, error) {
-	return s.runLogin(
-		ctx,
-		func(tx *Transaction) (Outcome, error) { return tx.BindEmail(ctx, currentToken, input) },
-	)
-}
-
-// Authenticate resolves a live application token. It does not authorize host resources.
+// Authenticate 解析仍然有效的应用令牌。它不授权宿主资源。
 func (s *Service) Authenticate(ctx context.Context, token string) (*Account, error) {
 	return authenticate(ctx, s.store, token, s.now().UTC())
 }
 
-// Logout idempotently revokes one session; malformed or missing credentials are a no-op.
+// Logout 幂等地撤销一个会话；凭证格式错误或缺失时不做任何事。
 func (s *Service) Logout(ctx context.Context, token string) error {
 	if !validToken(token) {
 		return nil
@@ -181,7 +165,7 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	return s.store.Sessions().Delete(ctx, digest(token))
 }
 
-// runLogin commits verification rejections before exposing them to the caller.
+// runLogin 先提交验证拒绝，再把它返回给调用方。
 func (s *Service) runLogin(
 	ctx context.Context,
 	fn func(*Transaction) (Outcome, error),
@@ -199,8 +183,4 @@ func (s *Service) runLogin(
 		return nil, outcome.Rejected
 	}
 	return outcome.Login, nil
-}
-
-func (s *Service) FindAccountByEmail(ctx context.Context, email string) (*Account, error) {
-	return s.store.Accounts().GetByEmail(ctx, email)
 }

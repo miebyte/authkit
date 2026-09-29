@@ -7,22 +7,22 @@ import (
 	"time"
 )
 
-// Transaction runs identity operations inside a caller-owned transaction.
-// Results, especially plaintext tokens, are provisional until the caller commits.
+// Transaction 在调用方拥有的事务内执行身份操作。
+// 结果，尤其是明文令牌，在调用方提交之前都只是暂定的。
 type Transaction struct {
 	repos        Repositories
 	registration RegistrationPolicy
 	now          func() time.Time
 }
 
-// codeLogin is one verification-code login, independent of the delivery channel.
+// codeLogin 表示一次验证码登录，与投递渠道无关。
 type codeLogin struct {
 	method string
 	target string
 	code   string
 }
 
-// emailCodeLogin normalizes a mailbox login into the shared code-login input.
+// emailCodeLogin 把邮箱登录规范化为共用的验证码登录输入。
 func emailCodeLogin(input EmailLoginInput) (codeLogin, error) {
 	email, err := NormalizeEmail(input.Email)
 	if err != nil {
@@ -31,7 +31,7 @@ func emailCodeLogin(input EmailLoginInput) (codeLogin, error) {
 	return codeLogin{method: MethodEmail, target: email, code: input.Code}, nil
 }
 
-// LoginEmail consumes valid email proof and opens a session for the admitted account.
+// LoginEmail 消费有效的邮箱证明，并为已准入的账号开启会话。
 func (t *Transaction) LoginEmail(ctx context.Context, input EmailLoginInput) (Outcome, error) {
 	login, err := emailCodeLogin(input)
 	if err != nil {
@@ -40,7 +40,7 @@ func (t *Transaction) LoginEmail(ctx context.Context, input EmailLoginInput) (Ou
 	return t.loginCode(ctx, login)
 }
 
-// loginCode consumes valid code proof and opens a session for the admitted account.
+// loginCode 消费有效的验证码证明，并为已准入的账号开启会话。
 func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, error) {
 	if !validCode(input.code) {
 		return Outcome{}, ErrInvalidInput
@@ -56,7 +56,9 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 		var account *Account
 		account, err = newCodeAccount(input)
 		if err == nil {
-			user, err = t.createAccount(ctx, account, input.method)
+			user, err = t.createAccount(ctx, account, Credential{
+				Method: input.method, Identifier: input.target,
+			})
 		}
 	}
 	if err != nil {
@@ -65,7 +67,7 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	return t.finishLogin(ctx, user, challenge, created, now)
 }
 
-// findCodeAccount loads the account already bound to this code target.
+// findCodeAccount 加载已经绑定到该验证码目标的账号。
 func (t *Transaction) findCodeAccount(ctx context.Context, input codeLogin) (*Account, error) {
 	switch input.method {
 	case MethodEmail:
@@ -75,7 +77,7 @@ func (t *Transaction) findCodeAccount(ctx context.Context, input codeLogin) (*Ac
 	}
 }
 
-// newCodeAccount builds an unsaved account for a code channel that has no owner yet.
+// newCodeAccount 为尚无所有者的验证码渠道构造一个未保存的账号。
 func newCodeAccount(input codeLogin) (*Account, error) {
 	switch input.method {
 	case MethodEmail:
@@ -85,113 +87,33 @@ func newCodeAccount(input codeLogin) (*Account, error) {
 	}
 }
 
-// LoginWechat uses only a server-verified identity. A first binding can reuse a
-// proven email account; already independent accounts are never merged.
+// LoginWechat 使用经服务端核验的身份登录或创建账号。
 func (t *Transaction) LoginWechat(
 	ctx context.Context,
 	subject WechatIdentity,
-	input WechatLoginInput,
 ) (Outcome, error) {
 	if !validWechatIdentity(subject) {
 		return Outcome{}, ErrWechatLogin
 	}
-	email, err := normalizeWechatInput(input)
-	if err != nil {
-		return Outcome{}, err
-	}
 	now := t.now().UTC()
-	var challenge *Challenge
-	if email != "" {
-		var rejected error
-		challenge, rejected, err = t.verifyCode(ctx, email, input.EmailCode, now)
-		if err != nil || rejected != nil {
-			return Outcome{Rejected: rejected}, err
-		}
-	}
 	openIDHash := digest(subject.OpenID)
 	user, err := t.repos.Accounts().GetByWechat(ctx, openIDHash)
-	newBinding := errors.Is(err, ErrNotFound)
-	if err != nil && !newBinding {
+	created := errors.Is(err, ErrNotFound)
+	if err != nil && !created {
 		return Outcome{}, err
 	}
-	created := false
-	if newBinding {
-		user = nil
-		if email != "" {
-			user, err = t.repos.Accounts().GetByEmail(ctx, email)
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				return Outcome{}, err
-			}
-			if errors.Is(err, ErrNotFound) {
-				user = nil
-			}
-		}
-		if user == nil {
-			user, err = t.createAccount(ctx, &Account{Email: email}, MethodWechat)
-			if err != nil {
-				return Outcome{}, err
-			}
-			created = true
-		}
-		if err = t.repos.Accounts().BindWechat(ctx, openIDHash, user.ID); err != nil {
-			return Outcome{}, err
-		}
-	} else if email != "" {
-		if err = t.bindEmail(ctx, user, email); err != nil {
+	if created {
+		user, err = t.createAccount(ctx, &Account{}, Credential{
+			Method: MethodWechat, Identifier: openIDHash,
+		})
+		if err != nil {
 			return Outcome{}, err
 		}
 	}
-	return t.finishLogin(ctx, user, challenge, created, now)
+	return t.finishLogin(ctx, user, nil, created, now)
 }
 
-// BindEmail verifies a mailbox for the live session owner and rotates the token
-// in the same transaction. A binding conflict leaves a correct code available.
-func (t *Transaction) BindEmail(
-	ctx context.Context,
-	currentToken string,
-	input BindEmailInput,
-) (Outcome, error) {
-	email, err := NormalizeEmail(input.Email)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !validCode(input.Code) {
-		return Outcome{}, ErrInvalidInput
-	}
-	now := t.now().UTC()
-	current, err := authenticate(ctx, t.repos, currentToken, now)
-	if err != nil {
-		return Outcome{}, err
-	}
-	challenge, rejected, err := t.verifyCode(ctx, email, input.Code, now)
-	if err != nil || rejected != nil {
-		return Outcome{Rejected: rejected}, err
-	}
-	user, err := t.repos.Accounts().GetByID(ctx, current.ID)
-	if err != nil {
-		return Outcome{}, err
-	}
-	bound, err := t.repos.Accounts().HasWechat(ctx, user.ID)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !bound {
-		return Outcome{}, ErrWechatRequired
-	}
-	if err = t.bindEmail(ctx, user, email); err != nil {
-		return Outcome{}, err
-	}
-	outcome, err := t.finishLogin(ctx, user, challenge, false, now)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if err = t.repos.Sessions().Delete(ctx, digest(currentToken)); err != nil {
-		return Outcome{}, err
-	}
-	return outcome, nil
-}
-
-// verifyCode returns expected proof failures separately so the attempt counter commits.
+// verifyCode 把预期的证明失败单独返回，以便尝试次数能够提交。
 func (t *Transaction) verifyCode(
 	ctx context.Context,
 	target, code string,
@@ -214,11 +136,11 @@ func (t *Transaction) verifyCode(
 	return challenge, nil, nil
 }
 
-// createAccount requires an explicit admission decision before persisting the account.
+// createAccount 在持久化账号之前要求明确的准入决定。
 func (t *Transaction) createAccount(
 	ctx context.Context,
 	account *Account,
-	method string,
+	credential Credential,
 ) (*Account, error) {
 	if t.registration == nil {
 		return nil, ErrRegistrationDenied
@@ -230,39 +152,17 @@ func (t *Transaction) createAccount(
 	account.ID = id
 	if err = t.registration.Authorize(
 		ctx,
-		Registration{Account: *account, Method: method},
+		Registration{Account: *account, Method: credential.Method},
 	); err != nil {
 		return nil, err
 	}
-	if err = t.repos.Accounts().Create(ctx, account); err != nil {
+	if err = t.repos.Accounts().Create(ctx, account, credential); err != nil {
 		return nil, err
 	}
 	return account, nil
 }
 
-// bindEmail preserves IDs and rejects mailbox replacement or cross-account merging.
-func (t *Transaction) bindEmail(ctx context.Context, user *Account, email string) error {
-	existing, err := t.repos.Accounts().GetByEmail(ctx, email)
-	if err == nil && existing.ID != user.ID {
-		return ErrEmailAccountConflict
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	if user.Email == email {
-		return nil
-	}
-	if user.Email != "" {
-		return ErrEmailBound
-	}
-	if err = t.repos.Accounts().BindEmail(ctx, user.ID, email); err != nil {
-		return err
-	}
-	user.Email = email
-	return nil
-}
-
-// finishLogin consumes optional mailbox proof and persists only the token digest.
+// finishLogin 消费可选的邮箱证明，并且只持久化令牌摘要。
 func (t *Transaction) finishLogin(
 	ctx context.Context,
 	account *Account,
@@ -303,7 +203,7 @@ func (t *Transaction) finishLogin(
 	}, nil
 }
 
-// authenticate avoids database lookups for malformed credentials and maps missing sessions.
+// authenticate 对格式错误的凭证跳过数据库查询，并把缺失会话映射为未授权。
 func authenticate(
 	ctx context.Context,
 	repos Repositories,

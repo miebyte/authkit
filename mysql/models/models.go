@@ -1,29 +1,29 @@
-// Package models defines the authkit schema. Hosts explicitly migrate these models.
+// Package models 定义 authkit 的表结构。宿主显式迁移这些模型。
 package models
 
 import "time"
 
-// Account is the login subject. Credentials live in bindings, not on this row.
+// Account 是登录主体。凭证存放在绑定表中，不在这一行上。
 type Account struct {
 	ID       string  `gorm:"column:id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	Username *string `gorm:"column:username;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:username"`
 }
 
-// TableName returns the account table.
+// TableName 返回账号表名。
 func (Account) TableName() string { return "auth_accounts" }
 
-// Binding attaches one unique credential, such as an email, phone or OpenID, to an account.
-// A null owner locks the credential before an account has been selected.
+// Binding 把一条唯一凭证挂到账号上，例如邮箱、手机号或 OpenID。
+// 所有者为空时，可在选定账号之前锁定该凭证。
 type Binding struct {
 	Method     string  `gorm:"column:method;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey;uniqueIndex:account_method,priority:2"`
 	Identifier string  `gorm:"column:identifier;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	AccountID  *string `gorm:"column:account_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:account_method,priority:1"`
 }
 
-// TableName returns the credential binding table.
+// TableName 返回凭证绑定表名。
 func (Binding) TableName() string { return "auth_bindings" }
 
-// Challenge persists code digests.
+// Challenge 持久化验证码摘要。
 type Challenge struct {
 	Email    string    `gorm:"column:email;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	Hash     string    `gorm:"column:hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null"`
@@ -33,30 +33,30 @@ type Challenge struct {
 	Ready    bool      `gorm:"column:ready;type:tinyint(1);not null"`
 }
 
-// TableName returns the verification challenge table.
+// TableName 返回验证挑战表名。
 func (Challenge) TableName() string { return "auth_challenges" }
 
-// Rate persists a fixed hourly window for one hashed identifier.
+// Rate 为一条哈希标识持久化固定的小时窗口。
 type Rate struct {
 	ID     string    `gorm:"column:id;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	Starts time.Time `gorm:"column:starts;type:datetime(6);not null"`
 	Hits   int       `gorm:"column:hits;type:int;not null"`
 }
 
-// TableName returns the send-rate table.
+// TableName 返回发送频率表名。
 func (Rate) TableName() string { return "auth_rates" }
 
-// Session persists application session digests, never plaintext credentials.
+// Session 持久化应用会话摘要，从不保存明文凭证。
 type Session struct {
 	Hash      string    `gorm:"column:hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	AccountID string    `gorm:"column:account_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;index:account_id"`
 	Expires   time.Time `gorm:"column:expires;type:datetime(6);not null;index:expires"`
 }
 
-// TableName returns the application session table.
+// TableName 返回应用会话表名。
 func (Session) TableName() string { return "auth_sessions" }
 
-// AllModels returns fresh model values for an explicit host AutoMigrate call.
+// AllModels 返回新的模型值，供宿主显式调用 AutoMigrate。
 func AllModels() []any {
 	return []any{&Account{}, &Binding{}, &Challenge{}, &Rate{}, &Session{}}
 }

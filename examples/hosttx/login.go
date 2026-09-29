@@ -1,4 +1,4 @@
-// Package hosttx demonstrates composing identity with host business writes.
+// Package hosttx 演示如何把身份操作与宿主业务写入组合在一起。
 package hosttx
 
 import (
@@ -10,16 +10,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// Hooks are implemented by host repositories using the supplied transaction.
+// Hooks 由宿主仓储实现，并使用传入的事务。
 type Hooks interface {
-	// Authorize may consume an invitation; it is called only for new accounts.
+	// Authorize 可以消费邀请；仅在创建新账号时调用。
 	Authorize(context.Context, *gorm.DB, authkit.Registration) error
-	// AfterLogin validates business access and applies writes such as joining a group.
+	// AfterLogin 校验业务访问权限，并执行入组等写入。
 	AfterLogin(context.Context, *gorm.DB, authkit.Account) error
 }
 
-// LoginEmail commits account/session and host writes together, while preserving
-// failed-code attempt counts. The host returns tokens only after this succeeds.
+// LoginEmail 把账号、会话和宿主写入一起提交，同时保留验证码失败的尝试次数。
+// 宿主只在它成功后返回令牌。
 func LoginEmail(
 	ctx context.Context,
 	db *gorm.DB,
@@ -50,13 +50,12 @@ func LoginEmail(
 	return outcome.Login, nil
 }
 
-// LoginWechat exchanges the provider code before holding database locks.
+// LoginWechat 在持有数据库锁之前先换取服务商 code。
 func LoginWechat(
 	ctx context.Context,
 	db *gorm.DB,
 	service *authkit.Service,
 	code string,
-	input authkit.WechatLoginInput,
 	hooks Hooks,
 ) (*authkit.LoginResult, error) {
 	subject, err := service.ExchangeWechat(ctx, code)
@@ -72,7 +71,7 @@ func LoginWechat(
 		)
 		var err error
 		outcome, err = service.InTransaction(authmysql.Bind(tx), policy).
-			LoginWechat(ctx, subject, input)
+			LoginWechat(ctx, subject)
 		if err != nil || outcome.Rejected != nil {
 			return err
 		}

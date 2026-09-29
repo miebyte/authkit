@@ -14,7 +14,7 @@ import (
 	"github.com/miebyte/authkit"
 )
 
-// TestExchangeCode covers the provider contract and excludes provider secrets from results.
+// TestExchangeCode 覆盖服务商约定，并确保结果中不包含服务商密钥。
 func TestExchangeCode(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -69,7 +69,7 @@ func TestExchangeCode(t *testing.T) {
 	}
 }
 
-// TestExchangeCodeCancellation verifies HTTP deadlines and caller cancellation.
+// TestExchangeCodeCancellation 验证 HTTP 超时和调用方取消。
 func TestExchangeCodeCancellation(t *testing.T) {
 	for _, mode := range []string{"client-timeout", "context-deadline", "context-cancel"} {
 		t.Run(mode, func(t *testing.T) {
@@ -107,7 +107,7 @@ func TestExchangeCodeCancellation(t *testing.T) {
 	}
 }
 
-// TestExchangeCodeRedirect ensures the credential-bearing request is not redirected.
+// TestExchangeCodeRedirect 确保携带凭证的请求不会被重定向。
 func TestExchangeCodeRedirect(t *testing.T) {
 	var followed atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +133,7 @@ func TestExchangeCodeRedirect(t *testing.T) {
 	}
 }
 
-// TestExchangeCodeTransportErrors prevents a net/http URL error from escaping to hosts.
+// TestExchangeCodeTransportErrors 防止 net/http 的 URL 错误泄漏给宿主。
 func TestExchangeCodeTransportErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	server.Close()
@@ -147,7 +147,7 @@ func TestExchangeCodeTransportErrors(t *testing.T) {
 	}
 }
 
-// TestExchangeCodeInput rejects unusable codes before contacting WeChat.
+// TestExchangeCodeInput 在联系微信之前拒绝不可用的 code。
 func TestExchangeCodeInput(t *testing.T) {
 	var contacted atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +171,7 @@ func TestExchangeCodeInput(t *testing.T) {
 	}
 }
 
-// TestConfig validates optional host configuration and rejects constructing disabled clients.
+// TestConfig 校验可选的宿主配置，并拒绝构造未启用的客户端。
 func TestConfig(t *testing.T) {
 	for _, config := range []Config{
 		{AppID: "app"},
@@ -202,7 +202,7 @@ func TestConfig(t *testing.T) {
 	}
 }
 
-// newTestClient preserves production HTTP policy while pointing requests at a test server.
+// newTestClient 保留生产环境的 HTTP 策略，同时把请求指向测试服务器。
 func newTestClient(t *testing.T, endpoint string) *Client {
 	t.Helper()
 	client, err := New(Config{AppID: "app", Secret: "private-secret"})
@@ -213,7 +213,7 @@ func newTestClient(t *testing.T, endpoint string) *Client {
 	return client
 }
 
-// assertSafeError rejects request URLs and provider secrets in returned error text.
+// assertSafeError 拒绝返回的错误文本中出现请求 URL 或服务商密钥。
 func assertSafeError(t *testing.T, err error, endpoint string) {
 	t.Helper()
 	if err != nil &&

@@ -315,9 +315,8 @@ func TestNewHTTPHandlerRequiresAdminCapableService(t *testing.T) {
 
 type handlerUnsupportedStore struct{ authkit.Store }
 
-// The identity fake implements only the repository methods exercised by the
-// public code and login flow. The embedded interfaces fail loudly if that flow
-// starts calling an additional repository operation.
+// 身份替身只实现公开验证码和登录流程会调用的仓储方法。
+// 该流程一旦调用额外的仓储操作，嵌入的接口会立即失败。
 type handlerAuthStore struct {
 	accounts       map[string]authkit.Account
 	challenges     map[string]authkit.Challenge

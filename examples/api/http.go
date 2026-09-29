@@ -9,39 +9,30 @@ import (
 	"github.com/miebyte/authkit"
 )
 
-// sendCodeRequest is POST /auth/email/codes.
+// sendCodeRequest 是 POST /auth/email/codes 的请求体。
 type sendCodeRequest struct {
 	Email string `json:"email"`
 }
 
-// emailLoginRequest is POST /auth/email/login.
+// emailLoginRequest 是 POST /auth/email/login 的请求体。
 type emailLoginRequest struct {
 	Email string `json:"email"`
 	Code  string `json:"code"`
 }
 
-// wechatLoginRequest is POST /auth/wechat/login.
-// Email and email_code are supplied together when the login must prove a mailbox.
+// wechatLoginRequest 是 POST /auth/wechat/login 的请求体。
 type wechatLoginRequest struct {
-	Code      string `json:"code"`
-	Email     string `json:"email,omitempty"`
-	EmailCode string `json:"email_code,omitempty"`
+	Code string `json:"code"`
 }
 
-// bindEmailRequest is POST /auth/email/bind.
-type bindEmailRequest struct {
-	Email string `json:"email"`
-	Code  string `json:"code"`
-}
-
-// accountResponse is the account returned to the client. It never includes an OpenID.
+// accountResponse 是返回给客户端的账号。它从不包含 OpenID。
 type accountResponse struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
 }
 
-// sessionResponse is the body of login and bind.
+// sessionResponse 是登录响应体。
 type sessionResponse struct {
 	Account accountResponse `json:"account"`
 	Token   string          `json:"token"`
@@ -49,12 +40,12 @@ type sessionResponse struct {
 	Created bool            `json:"created"`
 }
 
-// errorResponse is the body of every failure.
+// errorResponse 是所有失败响应的响应体。
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
-// sessionFrom maps a committed login into the public session body.
+// sessionFrom 把已提交的登录结果映射为公开的会话响应体。
 func sessionFrom(result *authkit.LoginResult) sessionResponse {
 	return sessionResponse{
 		Account: accountFrom(result.Account),
@@ -64,12 +55,12 @@ func sessionFrom(result *authkit.LoginResult) sessionResponse {
 	}
 }
 
-// accountFrom maps the identity fields a client is allowed to see.
+// accountFrom 映射客户端允许看到的身份字段。
 func accountFrom(account authkit.Account) accountResponse {
 	return accountResponse{ID: account.ID, Username: account.Username, Email: account.Email}
 }
 
-// decodeJSON reads one object and rejects unknown fields.
+// decodeJSON 读取一个对象，并拒绝未知字段。
 func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	decoder := json.NewDecoder(r.Body)
@@ -80,20 +71,20 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
 	return nil
 }
 
-// writeJSON sets the JSON content type and encodes body.
+// writeJSON 设置 JSON 内容类型并编码响应体。
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// writeError maps a stable authkit error onto an HTTP status and error code.
+// writeError 把稳定的 authkit 错误映射为 HTTP 状态码和错误码。
 func writeError(w http.ResponseWriter, err error) {
 	status, code := httpStatus(err)
 	writeJSON(w, status, errorResponse{Error: code})
 }
 
-// httpStatus returns the status and public error code for a service failure.
+// httpStatus 返回服务失败对应的状态码和公开错误码。
 func httpStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, authkit.ErrInvalidInput):
@@ -114,18 +105,10 @@ func httpStatus(err error) (int, string) {
 		return http.StatusUnauthorized, "unauthorized"
 	case errors.Is(err, authkit.ErrRegistrationDenied):
 		return http.StatusForbidden, "registration_denied"
-	case errors.Is(err, authkit.ErrWechatRequired):
-		return http.StatusForbidden, "wechat_required"
 	case errors.Is(err, authkit.ErrChallengeUpdated):
 		return http.StatusConflict, "code_replaced"
 	case errors.Is(err, authkit.ErrConflict):
 		return http.StatusConflict, "conflict"
-	case errors.Is(err, authkit.ErrWechatBound):
-		return http.StatusConflict, "wechat_bound"
-	case errors.Is(err, authkit.ErrEmailAccountConflict):
-		return http.StatusConflict, "email_conflict"
-	case errors.Is(err, authkit.ErrEmailBound):
-		return http.StatusConflict, "email_bound"
 	case errors.Is(err, authkit.ErrNotFound):
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, authkit.ErrMailFailed):

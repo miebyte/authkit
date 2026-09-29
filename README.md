@@ -1,6 +1,6 @@
 # authkit
 
-`authkit` 是嵌入 Go 服务的身份模块，提供邮箱验证码登录、微信小程序登录、账号绑定和会话管理。宿主负责业务 HTTP 接口、邮件投递、注册准入和业务权限；模块不依赖特定 Web 框架。可选的 `admin` 包提供内置超管后台页面。
+`authkit` 是嵌入 Go 服务的身份模块，提供邮箱验证码登录、微信小程序登录、账号创建和会话管理。宿主负责业务 HTTP 接口、邮件投递、注册准入和业务权限；模块不依赖特定 Web 框架。可选的 `admin` 包提供内置超管后台页面。
 
 - 模块路径：`github.com/miebyte/authkit`
 - Go 版本：`1.27.1`（以 `go.mod` 为准）
@@ -12,7 +12,7 @@
 | --- | --- |
 | 邮箱验证码 | 邮箱规范化、发码限流、邮件投递后激活验证码、验证并登录或注册 |
 | 微信小程序登录 | 服务端用 `wx.login` code 调用 `code2Session`，按 OpenID 识别账号 |
-| 账号绑定 | 首次微信登录可凭邮箱验证码复用已有邮箱账号；微信账号可绑定尚未被占用的邮箱 |
+| 账号创建 | 新账号在创建时写入邮箱或微信初始登录凭证，不合并不同登录方式的账号 |
 | 注册准入 | 创建新账号前调用宿主策略，可在同一事务内验证或消费邀请等业务数据 |
 | 会话 | 创建、认证、退出单个会话；数据库仅保存 Token 摘要 |
 | 宿主事务 | 身份写入可与邀请消费、入组等宿主业务写入一起提交或回滚 |
@@ -77,26 +77,17 @@ user, authErr := service.Authenticate(ctx, tokenFromRequest)
 logoutErr := service.Logout(ctx, tokenFromRequest)
 ```
 
-`SendCodeInput.IP` 由宿主根据可信代理配置取得；空值会让这类请求共用同一个 IP 限流桶。`LoginResult` 包含 `Account`、明文 `Token`、`Expires` 和 `Created`。账号 ID 和 Token 均为 256 位随机值，编码成 64 个十六进制字符。Token 只在创建或轮换会话时返回；`Logout` 仅撤销传入的会话，重复退出可安全重试。
+`SendCodeInput.IP` 由宿主根据可信代理配置取得；空值会让这类请求共用同一个 IP 限流桶。`LoginResult` 包含 `Account`、明文 `Token`、`Expires` 和 `Created`。账号 ID 和 Token 均为 256 位随机值，编码成 64 个十六进制字符。Token 只在创建会话时返回；`Logout` 仅撤销传入的会话，重复退出可安全重试。
 
-### 微信登录与绑定邮箱
+### 微信登录
 
 小程序把 `wx.login` 返回的 code 传给宿主，宿主调用：
 
 ```go
-login, err := service.LoginWechat(ctx, wxCode, authkit.WechatLoginInput{})
+login, err := service.LoginWechat(ctx, wxCode)
 ```
 
-需要邮箱证明时，先向邮箱发送验证码，再将 `Email` 和 `EmailCode` 一起传入 `WechatLoginInput`。首次微信登录可据此复用已有邮箱账号；已有微信账号若尚未绑定邮箱，可据此绑定。已独立注册的微信账号不会与另一个邮箱账号合并。也可以用当前会话 Token 单独绑定邮箱：
-
-```go
-login, err := service.BindEmail(ctx, currentToken, authkit.BindEmailInput{
-    Email: email,
-    Code:  code,
-})
-```
-
-只有拥有微信身份的账号可以调用 `BindEmail`，已绑定的邮箱不可替换。`BindEmail` 成功后账号 ID 不变，返回新 Token，原 `currentToken` 失效；其他设备的会话保留。尚未绑定邮箱的微信账号，其 `Account.Email` 为空字符串。不要把客户端提供的 OpenID 当作已验证身份；需要在宿主事务中登录时，先调用 `service.ExchangeWechat(ctx, wxCode)`。
+微信首次登录会创建独立账号，其 `Account.Email` 为空字符串。邮箱账号与微信账号不会自动合并。不要把客户端提供的 OpenID 当作已验证身份；需要在宿主事务中登录时，先调用 `service.ExchangeWechat(ctx, wxCode)`。
 
 ## 验证码、身份与错误
 
@@ -106,13 +97,13 @@ login, err := service.BindEmail(ctx, currentToken, authkit.BindEmailInput{
 - 微信只把 OpenID 当作登录凭证，入库前取摘要，不保存 AppID、UnionID 或 `session_key`。同一个 OpenID 只能绑定一个账号。
 - 会话有效期为 30 天，不自动续期；过期会话不能认证。过期数据的清理由宿主安排。
 
-错误可用 `errors.Is` 匹配。常见错误包括 `ErrInvalidEmail` / `ErrInvalidInput`、`ErrResendTooSoon` / `ErrTooManyRequests`、`ErrChallengeInvalid` / `ErrChallengeMismatch`、`ErrRegistrationDenied`、`ErrUnauthorized`，以及微信和绑定相关的 `ErrWechatCode`、`ErrWechatLogin`、`ErrEmailAccountConflict` 等。错误全集见 [`errors.go`](errors.go)。宿主负责把它们映射到自己的 HTTP 响应。
+错误可用 `errors.Is` 匹配。常见错误包括 `ErrInvalidEmail` / `ErrInvalidInput`、`ErrResendTooSoon` / `ErrTooManyRequests`、`ErrChallengeInvalid` / `ErrChallengeMismatch`、`ErrRegistrationDenied`、`ErrUnauthorized`、`ErrWechatCode` 和 `ErrWechatLogin`。错误全集见 [`errors.go`](errors.go)。宿主负责把它们映射到自己的 HTTP 响应。
 
 ## 与宿主业务共用事务
 
 普通 `Service` 方法自行管理事务。注册时若需同时消费邀请、建立业务关系等，宿主应开启 **READ COMMITTED** 事务，将同一个 `tx` 交给 `authmysql.Bind(tx)` 和业务仓储，再调用 `service.InTransaction(repos, policy)`。这里的 `policy` 替代服务创建时传入的策略，也必须使用同一个事务处理写入。
 
-`Transaction.LoginEmail`、`LoginWechat`、`BindEmail` 返回 `(authkit.Outcome, error)`：
+`Transaction.LoginEmail`、`LoginWechat` 返回 `(authkit.Outcome, error)`：
 
 1. `error != nil`：回滚事务。
 2. `Outcome.Rejected != nil`：跳过其他业务写入并提交事务，以保留错误验证码的尝试次数；提交后向客户端返回拒绝原因。
