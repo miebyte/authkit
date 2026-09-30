@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -83,23 +87,107 @@ func requireStatus(t *testing.T, got *httptest.ResponseRecorder, want int) {
 	}
 }
 
+var consoleResourceRefs = regexp.MustCompile(`(?:src|href)="([^"]+)"`)
+
+func assertConsoleResources(t *testing.T, mux *http.ServeMux, pagePath string) {
+	t.Helper()
+	page := httptest.NewRecorder()
+	mux.ServeHTTP(page, httptest.NewRequest(http.MethodGet, pagePath, nil))
+	requireStatus(t, page, http.StatusOK)
+	if page.Body.Len() == 0 || !strings.HasPrefix(page.Header().Get("Content-Type"), "text/html") {
+		t.Fatal("console page is empty or has the wrong content type")
+	}
+	if got := page.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	pageURL, err := url.Parse("http://example.test" + pagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasJS, hasCSS, hasFavicon bool
+	for _, match := range consoleResourceRefs.FindAllStringSubmatch(page.Body.String(), -1) {
+		ref, err := url.Parse(match[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		assetPath := strings.TrimPrefix(ref.Path, "./")
+		if !strings.HasPrefix(assetPath, "assets/") {
+			continue
+		}
+		resource := httptest.NewRecorder()
+		mux.ServeHTTP(resource, httptest.NewRequest(http.MethodGet, pageURL.ResolveReference(ref).RequestURI(), nil))
+		requireStatus(t, resource, http.StatusOK)
+		if resource.Body.Len() == 0 || resource.Header().Get("Content-Type") == "" {
+			t.Fatalf("embedded resource %q is empty or missing its content type", match[1])
+		}
+		if got := resource.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("resource %q X-Content-Type-Options = %q", match[1], got)
+		}
+		switch path.Ext(assetPath) {
+		case ".js":
+			hasJS = true
+		case ".css":
+			hasCSS = true
+		case ".svg":
+			if path.Base(assetPath) == "favicon.svg" {
+				hasFavicon = true
+				if got := resource.Header().Get("Content-Type"); got != "image/svg+xml" {
+					t.Fatalf("favicon Content-Type = %q", got)
+				}
+			}
+		}
+	}
+	if !hasJS || !hasCSS || !hasFavicon {
+		t.Fatalf("console resource references: JS=%t CSS=%t favicon=%t", hasJS, hasCSS, hasFavicon)
+	}
+}
+
 func TestConsolePageAndAssets(t *testing.T) {
 	f := newHandlerFixture(t)
-	for _, path := range []string{
-		"/authkit/admin/",
-		"/authkit/admin/assets/app.css",
-		"/authkit/admin/assets/app.js",
-	} {
-		t.Run(path, func(t *testing.T) {
-			response := f.request(http.MethodGet, path, "", "")
-			requireStatus(t, response, http.StatusOK)
-			if response.Body.Len() == 0 || response.Header().Get("Content-Type") == "" {
-				t.Fatal("embedded resource is empty or missing its content type")
-			}
-			if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-				t.Fatalf("X-Content-Type-Options = %q", got)
-			}
-		})
+	assertConsoleResources(t, f.mux, "/authkit/admin/")
+	page := f.request(http.MethodGet, "/authkit/admin/", "", "")
+	if !strings.Contains(page.Body.String(), `<meta name="authkit-title" content="AuthKit">`) {
+		t.Fatal("console page does not expose its default title")
+	}
+}
+
+func TestConsoleCustomTitle(t *testing.T) {
+	f := newHandlerFixture(t)
+	title := `工作台 <管理> & "运营" '后台'`
+	handler, err := NewHTTPHandler(f.service, testAdminID, Config{Title: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/ops/", http.StripPrefix("/ops", handler))
+	for _, path := range []string{"/ops/", "/ops/login", "/ops/overview", "/ops/accounts"} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		requireStatus(t, response, http.StatusOK)
+		body := response.Body.String()
+		if !strings.Contains(body, `<meta name="authkit-title" content="`+html.EscapeString(title)+`">`) {
+			t.Fatalf("%s does not expose escaped custom title", path)
+		}
+		if !strings.Contains(body, "<title>"+html.EscapeString(title)+" 超管后台</title>") {
+			t.Fatalf("%s does not use custom browser title", path)
+		}
+	}
+}
+
+func TestConsoleEmptyTitleUsesDefault(t *testing.T) {
+	f := newHandlerFixture(t)
+	handler, err := NewHTTPHandler(f.service, testAdminID, Config{Title: " \t "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	requireStatus(t, response, http.StatusOK)
+	if !strings.Contains(response.Body.String(), `<meta name="authkit-title" content="AuthKit">`) {
+		t.Fatal("blank title did not use the default")
+	}
+	if _, err := NewHTTPHandler(f.service, testAdminID, Config{}, Config{}); !errors.Is(err, authkit.ErrInvalidInput) {
+		t.Fatalf("multiple title configurations = %v", err)
 	}
 }
 
@@ -122,10 +210,16 @@ func TestNewHTTPHandlerCustomPrefix(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/ops/", http.StripPrefix("/ops", handler))
-	for _, path := range []string{"/ops/", "/ops/assets/app.css", "/ops/assets/app.js"} {
+	for _, path := range []string{"/ops/", "/ops/login", "/ops/overview", "/ops/accounts"} {
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		requireStatus(t, response, http.StatusOK)
+	}
+	assertConsoleResources(t, mux, "/ops/accounts")
+	for _, path := range []string{"/ops/unknown", "/ops/assets/missing.js"} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		requireStatus(t, response, http.StatusNotFound)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/ops/api/me", nil)
 	response := httptest.NewRecorder()

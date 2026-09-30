@@ -3,43 +3,62 @@
 package admin
 
 import (
+	"bytes"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 
 	"github.com/miebyte/authkit"
 )
 
-//go:embed assets/index.html assets/app.css assets/app.js
+//go:embed assets
 var assets embed.FS
+
+// Config 配置内置超管界面的可选展示信息。
+type Config struct {
+	// Title 设置左上角品牌名；留空时使用 AuthKit。
+	Title string
+}
 
 // handler 按挂载路径提供控制台及其需认证的 API。
 type handler struct {
 	service *authkit.Service
 	adminID string
+	title   string
 	mux     *http.ServeMux
 }
 
 // NewHTTPHandler 返回可挂载到任意路径的控制台。宿主通过 ID 选择已有的超级管理员账号。
-func NewHTTPHandler(service *authkit.Service, adminAccountID string) (http.Handler, error) {
-	if service == nil || !validID(adminAccountID) {
+func NewHTTPHandler(service *authkit.Service, adminAccountID string, configs ...Config) (http.Handler, error) {
+	if service == nil || !validID(adminAccountID) || len(configs) > 1 {
 		return nil, authkit.ErrInvalidInput
+	}
+
+	title := "AuthKit"
+	if len(configs) == 1 && strings.TrimSpace(configs[0].Title) != "" {
+		title = strings.TrimSpace(configs[0].Title)
 	}
 
 	h := &handler{
 		service: service,
 		adminID: strings.ToLower(adminAccountID),
+		title:   title,
 		mux:     http.NewServeMux(),
 	}
 	h.mux.HandleFunc("GET /{$}", h.index)
-	h.mux.HandleFunc("GET /assets/app.css", h.asset("assets/app.css", "text/css; charset=utf-8"))
-	h.mux.HandleFunc("GET /assets/app.js", h.asset("assets/app.js", "text/javascript; charset=utf-8"))
+	h.mux.HandleFunc("GET /login", h.index)
+	h.mux.HandleFunc("GET /overview", h.index)
+	h.mux.HandleFunc("GET /accounts", h.index)
+	h.mux.HandleFunc("GET /assets/", h.asset)
 	h.mux.HandleFunc("POST /api/codes", h.sendCode)
 	h.mux.HandleFunc("POST /api/login", h.login)
 	h.mux.HandleFunc("POST /api/logout", h.withAdmin(h.logout))
@@ -65,17 +84,27 @@ func (h *handler) index(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data, _ := assets.ReadFile("assets/index.html")
+	escapedTitle := html.EscapeString(h.title)
+	data = bytes.Replace(data, []byte(`<meta name="authkit-title" content="AuthKit">`), []byte(`<meta name="authkit-title" content="`+escapedTitle+`">`), 1)
+	data = bytes.Replace(data, []byte("<title>AuthKit 超管后台</title>"), []byte("<title>"+escapedTitle+" 超管后台</title>"), 1)
 	_, _ = w.Write(data)
 }
 
-func (h *handler) asset(name, contentType string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Cache-Control", "no-store")
-		data, _ := assets.ReadFile(name)
-		_, _ = w.Write(data)
+func (h *handler) asset(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	name := "assets" + r.URL.Path
+	data, err := assets.ReadFile(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
 	}
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	w.Header().Set("Content-Type", contentType)
+	_, _ = w.Write(data)
 }
 
 type emailRequest struct {

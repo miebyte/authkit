@@ -1,0 +1,182 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1d3031;
+  background: #f5f7f7;
+  font-synthesis: none;
+  color-scheme: light;
+
+  --color-background: #f5f7f7;
+  --color-surface: #fff;
+  --color-text: #1d3031;
+  --color-muted: #718684;
+  --color-line: #e0e8e5;
+  --color-brand: #176a60;
+  --color-brand-hover: #10554d;
+  --color-danger: #ad3b3b;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 3px solid #78b9b0;
+  outline-offset: 2px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease,
+    transform 100ms ease-out;
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.button-primary {
+  background: var(--color-brand);
+  color: #fff;
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--color-brand-hover);
+}
+
+.button-secondary {
+  border-color: #d9e1e0;
+  background: #fff;
+  color: #345354;
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: #b6cdca;
+  background: #f2f7f6;
+}
+
+.button-quiet {
+  background: transparent;
+  color: #4a6262;
+}
+
+.button-quiet:hover:not(:disabled) {
+  background: #edf3f2;
+}
+
+.button-danger {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+.button-danger:hover:not(:disabled) {
+  background: #912e2e;
+}
+
+.button-outline-danger {
+  border-color: #e4c7c7;
+  background: #fff;
+  color: #a23b3b;
+}
+
+.button-outline-danger:hover:not(:disabled) {
+  background: #fff4f3;
+}
+
+.button-small {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.eyebrow {
+  margin: 0 0 9px;
+  color: #398177;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+
+.brand > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.brand small {
+  margin-left: 4px;
+  color: #9db9b6;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.brand-mark {
+  display: grid;
+  width: 33px;
+  height: 33px;
+  flex: 0 0 33px;
+  place-items: center;
+  border-radius: 9px;
+  background: #278779;
+  color: #fff;
+  font-size: 19px;
+  font-weight: 800;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button {
+    transition: none;
+  }
+
+  .button:active:not(:disabled) {
+    transform: none;
+  }
+}

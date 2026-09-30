@@ -132,6 +132,10 @@ mux.Handle("/ops/", http.StripPrefix("/ops", adminHandler))
 
 `http.Handler` 是 Go 接口，无需使用 `*http.Handler`。挂载路径由宿主决定；上例使用 `/ops/`。MySQL 管理查询使用 `service` 已持有的存储，不需要单独创建后台 Store。自定义存储可在同一个存储对象上实现可选的 `authkit.AdminRepository`；未实现时构造后台会返回 `ErrAdminUnavailable`。
 
+左上角品牌名默认是 `AuthKit`。需要显示宿主名称时，可传入 `admin.Config{Title: "我的应用"}` 作为 `NewHTTPHandler` 的第三个参数；登录页、侧栏和浏览器标签标题会使用该名称。
+
+超管界面使用 Vue 3 和 TypeScript，源码位于 `admin/frontend`。概览与账号管理分别对应 `/ops/overview`、`/ops/accounts`，可直接打开和刷新；实际前缀随宿主挂载路径变化。构建资源位于 `admin/assets`，随 Go 包内嵌，使用 Go 包时无需安装 Node.js。修改前端后使用 Node.js 22.12 或更新版本运行 `make admin-ui`，并提交更新后的内嵌资源。
+
 后台可查询账号、邮箱及微信绑定状态和有效会话；可解绑非超管账号的邮箱或微信凭据、撤销单个或全部会话。解绑会同时撤销该账号的全部会话，邮箱解绑还会清除待验证的邮箱验证码；不能移除最后一种登录方式。微信 OpenID 的摘要不会显示在页面或管理 API 中。后台不会自行迁移数据库，仍须由宿主执行 `authmysql.Models()` 迁移。建议通过 HTTPS 提供页面；浏览器仅在当前标签会话中保存管理 Token。
 
 ## 数据表与开发
