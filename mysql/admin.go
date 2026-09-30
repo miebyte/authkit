@@ -61,9 +61,11 @@ func (s *Store) AdminListAccounts(
 			WHERE b.account_id = auth_accounts.id AND b.method = ? LIMIT 1), '') AS email,
 		EXISTS (SELECT 1 FROM auth_bindings AS b
 			WHERE b.account_id = auth_accounts.id AND b.method = ?) AS wechat,
+		EXISTS (SELECT 1 FROM auth_bindings AS b
+			WHERE b.account_id = auth_accounts.id AND b.method = ? AND b.password_hash IS NOT NULL) AS password,
 		(SELECT COUNT(*) FROM auth_sessions AS sess
 			WHERE sess.account_id = auth_accounts.id AND sess.expires > ?) AS active_sessions`,
-		authkit.MethodEmail, authkit.MethodWechat, now.UTC()).
+		authkit.MethodEmail, authkit.MethodWechat, authkit.MethodPassword, now.UTC()).
 		Order("auth_accounts.id").Limit(limit).Offset((page - 1) * limit).
 		Scan(&result.Items).Error; err != nil {
 		return authkit.AdminAccountPage{}, mapError(err)
@@ -91,6 +93,9 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 	}
 	for _, binding := range bindings {
 		info := authkit.AdminBindingInfo{Method: binding.Method}
+		if binding.Method == authkit.MethodPassword {
+			info.Identifier = binding.Identifier
+		}
 		if binding.Method == authkit.MethodEmail {
 			info.Identifier = binding.Identifier
 			result.Email = binding.Identifier
@@ -111,7 +116,7 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 // AdminDeleteBinding 移除一条凭证，同时保留至少一种登录方式。
 func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string) error {
 	if strings.TrimSpace(accountID) == "" ||
-		(method != authkit.MethodEmail && method != authkit.MethodWechat) {
+		(method != authkit.MethodEmail && method != authkit.MethodWechat && method != authkit.MethodPassword) {
 		return authkit.ErrInvalidInput
 	}
 	return mapError(s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -127,8 +132,8 @@ func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string
 		}
 		var count int64
 		if err := tx.Model(&models.Binding{}).
-			Where("account_id = ? AND method IN ?", accountID,
-				[]string{authkit.MethodEmail, authkit.MethodWechat}).Count(&count).Error; err != nil {
+			Where("account_id = ? AND (method IN ? OR (method = ? AND password_hash IS NOT NULL))", accountID,
+				[]string{authkit.MethodEmail, authkit.MethodWechat}, authkit.MethodPassword).Count(&count).Error; err != nil {
 			return mapError(err)
 		}
 		if count <= 1 {

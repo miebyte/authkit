@@ -58,14 +58,19 @@ func NewHTTPHandler(service *authkit.Service, adminAccountID string, configs ...
 	h.mux.HandleFunc("GET /login", h.index)
 	h.mux.HandleFunc("GET /overview", h.index)
 	h.mux.HandleFunc("GET /accounts", h.index)
+	h.mux.HandleFunc("GET /blacklist", h.index)
 	h.mux.HandleFunc("GET /assets/", h.asset)
 	h.mux.HandleFunc("POST /api/codes", h.sendCode)
 	h.mux.HandleFunc("POST /api/login", h.login)
+	h.mux.HandleFunc("POST /api/password/login", h.loginPassword)
 	h.mux.HandleFunc("POST /api/logout", h.withAdmin(h.logout))
 	h.mux.HandleFunc("GET /api/me", h.withAdmin(h.me))
 	h.mux.HandleFunc("GET /api/overview", h.withAdmin(h.overview))
 	h.mux.HandleFunc("GET /api/accounts", h.withAdmin(h.accounts))
 	h.mux.HandleFunc("GET /api/accounts/{id}", h.withAdmin(h.account))
+	h.mux.HandleFunc("GET /api/blacklist", h.withAdmin(h.blacklist))
+	h.mux.HandleFunc("POST /api/blacklist", h.withAdmin(h.addBlacklist))
+	h.mux.HandleFunc("DELETE /api/blacklist/{id}", h.withAdmin(h.removeBlacklist))
 	h.mux.HandleFunc("DELETE /api/accounts/{id}/bindings/{method}", h.withAdmin(h.deleteBinding))
 	h.mux.HandleFunc("DELETE /api/accounts/{id}/sessions/{sessionID}", h.withAdmin(h.revokeSession))
 	h.mux.HandleFunc("POST /api/accounts/{id}/sessions/revoke", h.withAdmin(h.revokeAllSessions))
@@ -114,6 +119,16 @@ type emailRequest struct {
 type loginRequest struct {
 	Email string `json:"email"`
 	Code  string `json:"code"`
+}
+
+type passwordLoginRequest struct {
+	Identifier string `json:"identifier"`
+	Password   string `json:"password"`
+}
+
+type blacklistRequest struct {
+	Method     string `json:"method"`
+	Identifier string `json:"identifier"`
 }
 
 type accountResponse struct {
@@ -193,6 +208,27 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	}{Token: result.Token, Account: accountFrom(&result.Account)})
 }
 
+func (h *handler) loginPassword(w http.ResponseWriter, r *http.Request) {
+	var body passwordLoginRequest
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := h.service.AdminLoginPassword(r.Context(), h.adminID, authkit.PasswordLoginInput{
+		Identifier: body.Identifier,
+		Password:   body.Password,
+		IP:         clientIP(r),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Token   string          `json:"token"`
+		Account accountResponse `json:"account"`
+	}{Token: result.Token, Account: accountFrom(&result.Account)})
+}
+
 func (h *handler) withAdmin(next func(http.ResponseWriter, *http.Request, *authkit.Account, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
@@ -258,6 +294,52 @@ func (h *handler) accounts(w http.ResponseWriter, r *http.Request, _ *authkit.Ac
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (h *handler) blacklist(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+	page, err := positiveInt(r.URL.Query().Get("page"), 1, 1000000)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	limit, err := positiveInt(r.URL.Query().Get("limit"), 20, 100)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := h.service.ListBlacklist(r.Context(), page, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) addBlacklist(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+	var body blacklistRequest
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	credential := authkit.Credential{Method: body.Method, Identifier: body.Identifier}
+	if err := h.service.AdminAddBlacklist(r.Context(), credential, h.adminID); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) removeBlacklist(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+	id := r.PathValue("id")
+	if !validID(id) {
+		writeError(w, authkit.ErrInvalidInput)
+		return
+	}
+	if err := h.service.RemoveBlacklist(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *handler) account(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
 	id := r.PathValue("id")
 	if !validID(id) {
@@ -274,7 +356,7 @@ func (h *handler) account(w http.ResponseWriter, r *http.Request, _ *authkit.Acc
 
 func (h *handler) deleteBinding(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
 	id, method := r.PathValue("id"), r.PathValue("method")
-	if !validID(id) || method != authkit.MethodEmail && method != authkit.MethodWechat {
+	if !validID(id) || method != authkit.MethodEmail && method != authkit.MethodWechat && method != authkit.MethodPassword {
 		writeError(w, authkit.ErrInvalidInput)
 		return
 	}
@@ -352,6 +434,14 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code = http.StatusBadRequest, "incorrect_code"
 	case errors.Is(err, authkit.ErrUnauthorized):
 		status, code = http.StatusUnauthorized, "unauthorized"
+	case errors.Is(err, authkit.ErrInvalidCredentials):
+		status, code = http.StatusUnauthorized, "invalid_credentials"
+	case errors.Is(err, authkit.ErrEmailUnavailable):
+		status, code = http.StatusServiceUnavailable, "email_unavailable"
+	case errors.Is(err, authkit.ErrBlacklisted):
+		status, code = http.StatusForbidden, "blacklisted"
+	case errors.Is(err, authkit.ErrProtectedAccount):
+		status, code = http.StatusForbidden, "forbidden"
 	case errors.Is(err, authkit.ErrNotFound):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, authkit.ErrLastBinding):

@@ -24,8 +24,8 @@ const noticeError = ref(false)
 let noticeTimer: number | undefined
 
 function loginTarget(): { name: string; query?: { redirect: string } } {
-  return route.name === 'accounts'
-    ? { name: 'login', query: { redirect: '/accounts' } }
+  return route.name === 'accounts' || route.name === 'blacklist'
+    ? { name: 'login', query: { redirect: route.path } }
     : { name: 'login' }
 }
 
@@ -101,7 +101,7 @@ watch(status, (next, previous) => {
 })
 
 watch(() => route.name, (name) => {
-  const label = name === 'overview' ? '概览' : name === 'accounts' ? '账号管理' : '登录'
+  const label = name === 'overview' ? '概览' : name === 'accounts' ? '账号管理' : name === 'blacklist' ? '黑名单' : '登录'
   document.title = `${label} · ${brandTitle} 超管后台`
 }, { immediate: true })
 

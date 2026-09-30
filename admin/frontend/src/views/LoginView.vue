@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { login, sendCode } from '@/api/admin'
+import { login, loginPassword, sendCode } from '@/api/admin'
 import { errorMessage } from '@/api/request'
 import { session } from '@/stores/session'
 import { brandTitle } from '@/utils/brand'
 
 const router = useRouter()
 const route = useRoute()
+const method = ref<'password' | 'email'>('password')
+const identifier = ref('')
+const password = ref('')
 const email = ref('')
 const code = ref('')
+const form = ref<HTMLFormElement | null>(null)
 const emailInput = ref<HTMLInputElement | null>(null)
 const codeInput = ref<HTMLInputElement | null>(null)
 const sending = ref(false)
@@ -20,6 +24,14 @@ const feedbackError = ref(false)
 function setFeedback(message: string, isError = false): void {
   feedback.value = message
   feedbackError.value = isError
+}
+
+function changeMethod(next: 'password' | 'email'): void {
+  if (sending.value || submitting.value || method.value === next) return
+  method.value = next
+  password.value = ''
+  code.value = ''
+  setFeedback('')
 }
 
 async function handleSendCode(): Promise<void> {
@@ -39,17 +51,25 @@ async function handleSendCode(): Promise<void> {
 }
 
 async function handleLogin(): Promise<void> {
-  if (sending.value || submitting.value || !emailInput.value?.reportValidity() || !codeInput.value?.reportValidity()) {
+  if (sending.value || submitting.value || !form.value?.reportValidity()) {
+    return
+  }
+  if (method.value === 'password' && Array.from(password.value).length > 128) {
+    setFeedback('密码不能超过 128 个字符。', true)
     return
   }
 
   submitting.value = true
   setFeedback('正在登录…')
   try {
-    const result = await login(email.value.trim(), code.value.trim())
+    const result = method.value === 'password'
+      ? await loginPassword(identifier.value.trim(), password.value)
+      : await login(email.value.trim(), code.value.trim())
     session.establish(result.token, result.account)
     code.value = ''
-    await router.replace(route.query.redirect === '/accounts' ? '/accounts' : '/overview')
+    password.value = ''
+    const redirect = route.query.redirect
+    await router.replace(redirect === '/accounts' || redirect === '/blacklist' ? redirect : '/overview')
   } catch (error) {
     setFeedback(errorMessage(error), true)
   } finally {
@@ -69,46 +89,90 @@ async function handleLogin(): Promise<void> {
       <div class="login-heading">
         <p class="eyebrow">管理员入口</p>
         <h1 id="login-title">登录超管后台</h1>
-        <p>使用管理员邮箱接收验证码，安全访问账号与会话数据。</p>
+        <p>使用管理员账号密码或邮箱验证码，访问账号与会话数据。</p>
       </div>
 
-      <form @submit.prevent="handleLogin">
-        <label for="login-email">邮箱地址</label>
-        <div class="email-row">
+      <div class="login-methods" aria-label="登录方式">
+        <button
+          class="method-button"
+          type="button"
+          :aria-pressed="method === 'password'"
+          :disabled="sending || submitting"
+          @click="changeMethod('password')"
+        >账号密码</button>
+        <button
+          class="method-button"
+          type="button"
+          :aria-pressed="method === 'email'"
+          :disabled="sending || submitting"
+          @click="changeMethod('email')"
+        >邮箱验证码</button>
+      </div>
+
+      <form ref="form" @submit.prevent="handleLogin">
+        <template v-if="method === 'password'">
+          <label for="login-identifier">用户名或邮箱</label>
           <input
-            id="login-email"
-            ref="emailInput"
-            v-model="email"
-            name="email"
-            type="email"
-            autocomplete="email"
-            placeholder="请输入管理员邮箱"
+            id="login-identifier"
+            v-model="identifier"
+            class="first-field"
+            name="username"
+            type="text"
+            autocomplete="username"
+            placeholder="请输入管理员用户名或邮箱"
             required
           >
-          <button
-            class="button button-secondary send-code"
-            type="button"
-            :disabled="sending || submitting"
-            @click="handleSendCode"
+          <label for="login-password">密码</label>
+          <input
+            id="login-password"
+            v-model="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            maxlength="256"
+            placeholder="请输入密码"
+            required
           >
-            {{ sending ? '正在发送…' : '发送验证码' }}
-          </button>
-        </div>
+        </template>
 
-        <label for="login-code">验证码</label>
-        <input
-          id="login-code"
-          ref="codeInput"
-          v-model="code"
-          name="code"
-          type="text"
-          inputmode="numeric"
-          autocomplete="one-time-code"
-          pattern="[0-9]{6}"
-          maxlength="6"
-          placeholder="输入 6 位验证码"
-          required
-        >
+        <template v-else>
+          <label for="login-email">邮箱地址</label>
+          <div class="email-row">
+            <input
+              id="login-email"
+              ref="emailInput"
+              v-model="email"
+              name="email"
+              type="email"
+              autocomplete="email"
+              placeholder="请输入管理员邮箱"
+              required
+            >
+            <button
+              class="button button-secondary send-code"
+              type="button"
+              :disabled="sending || submitting"
+              @click="handleSendCode"
+            >
+              {{ sending ? '正在发送…' : '发送验证码' }}
+            </button>
+          </div>
+
+          <label for="login-code">验证码</label>
+          <input
+            id="login-code"
+            ref="codeInput"
+            v-model="code"
+            name="code"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxlength="6"
+            placeholder="输入 6 位验证码"
+            required
+          >
+        </template>
 
         <p class="form-feedback" :class="{ 'is-error': feedbackError }" role="status" aria-live="polite">
           {{ feedback }}
@@ -195,6 +259,47 @@ async function handleLogin(): Promise<void> {
 
 .login-card input::placeholder {
   color: #9aabaa;
+}
+
+.login-methods {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 24px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #f1f5f4;
+}
+
+.method-button {
+  min-height: 40px;
+  flex: 1;
+  padding: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #708080;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.method-button[aria-pressed="true"] {
+  background: #fff;
+  color: #193f3c;
+  box-shadow: 0 2px 6px rgb(20 58 53 / 7%);
+}
+
+.method-button:focus-visible {
+  outline: 2px solid #4b9d92;
+  outline-offset: 2px;
+}
+
+.method-button:disabled {
+  cursor: default;
+}
+
+.first-field {
+  margin-bottom: 23px;
 }
 
 .email-row {

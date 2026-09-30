@@ -160,7 +160,9 @@ function askDeleteBinding(binding: AdminBindingInfo): void {
   const account = detail.value
   if (!account) return
   successMessage.value = ''
-  const type = binding.method === 'wechat' ? '微信' : binding.method === 'email' ? '邮箱' : binding.method
+  const type = binding.method === 'wechat' ? '微信'
+    : binding.method === 'email' ? '邮箱'
+      : binding.method === 'password' ? '账号密码' : binding.method
   pendingAction.value = {
     title: '解除登录绑定',
     message: `确定解除“${accountName(account)}”的${type}绑定吗？这会移除对应登录方式。`,
@@ -255,6 +257,7 @@ defineExpose({ refresh })
               <th scope="col">账号</th>
               <th scope="col">邮箱</th>
               <th scope="col">微信</th>
+              <th scope="col">账号密码</th>
               <th scope="col">有效会话</th>
               <th scope="col" class="action-heading">操作</th>
             </tr>
@@ -271,6 +274,11 @@ defineExpose({ refresh })
               <td>
                 <span class="status-pill" :class="{ off: !account.wechat }">
                   {{ account.wechat ? '已绑定' : '未绑定' }}
+                </span>
+              </td>
+              <td>
+                <span class="status-pill" :class="{ off: !account.password }">
+                  {{ account.password ? '已开通' : '未开通' }}
                 </span>
               </td>
               <td class="count">{{ account.active_sessions }}</td>

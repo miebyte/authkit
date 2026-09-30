@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,13 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	if !validCode(input.code) {
 		return Outcome{}, ErrInvalidInput
 	}
+	if err := t.repos.Blacklist().Check(ctx, Credential{Method: input.method, Identifier: input.target}); err != nil {
+		return Outcome{}, err
+	}
+	// 先锁账号再锁验证码，与后台解绑及拉黑操作保持相同顺序。
+	if err := checkEmailAccount(ctx, t.repos, input.target); err != nil {
+		return Outcome{}, err
+	}
 	now := t.now().UTC()
 	challenge, rejected, err := t.verifyCode(ctx, input.target, input.code, now)
 	if err != nil || rejected != nil {
@@ -52,13 +60,19 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	}
 	user, err := t.findCodeAccount(ctx, input)
 	created := errors.Is(err, ErrNotFound)
+	// 如果账号不存在，则创建账号
 	if created {
 		var account *Account
 		account, err = newCodeAccount(input)
 		if err == nil {
-			user, err = t.createAccount(ctx, account, Credential{
-				Method: input.method, Identifier: input.target,
-			})
+			user, err = t.createAccount(
+				ctx,
+				account,
+				Credential{
+					Method:     input.method,
+					Identifier: input.target,
+				},
+			)
 		}
 	}
 	if err != nil {
@@ -97,6 +111,9 @@ func (t *Transaction) LoginWechat(
 	}
 	now := t.now().UTC()
 	openIDHash := digest(subject.OpenID)
+	if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodWechat, Identifier: openIDHash}); err != nil {
+		return Outcome{}, err
+	}
 	user, err := t.repos.Accounts().GetByWechat(ctx, openIDHash)
 	created := errors.Is(err, ErrNotFound)
 	if err != nil && !created {
@@ -121,7 +138,8 @@ func (t *Transaction) verifyCode(
 ) (*Challenge, error, error) {
 	challenge, err := t.repos.Challenges().Find(ctx, target)
 	if errors.Is(err, ErrNotFound) {
-		return nil, ErrChallengeInvalid, nil
+		// 未知邮箱没有尝试次数需要提交，回滚凭证检查产生的占位。
+		return nil, nil, ErrChallengeInvalid
 	}
 	if err != nil {
 		return nil, nil, err
@@ -149,17 +167,185 @@ func (t *Transaction) createAccount(
 	if err != nil {
 		return nil, err
 	}
+
 	account.ID = id
-	if err = t.registration.Authorize(
-		ctx,
-		Registration{Account: *account, Method: credential.Method},
-	); err != nil {
+	err = t.registration.Authorize(ctx, Registration{Account: *account, Method: credential.Method})
+	if err != nil {
 		return nil, err
 	}
-	if err = t.repos.Accounts().Create(ctx, account, credential); err != nil {
+
+	err = t.repos.Accounts().Create(ctx, account, credential)
+	if err != nil {
+		return nil, err
+	}
+
+	return account, nil
+}
+
+// CreatePasswordAccount 在宿主事务内创建密码账号，返回值须在提交后使用。
+func (t *Transaction) CreatePasswordAccount(ctx context.Context, input CreatePasswordAccountInput) (*Account, error) {
+	username, err := NormalizeUsername(input.Username)
+	if err != nil || !validPassword(input.Password, 8) {
+		return nil, ErrInvalidInput
+	}
+
+	hash, err := hashPassword(input.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	credential := Credential{Method: MethodPassword, Identifier: username}
+	if err := t.repos.Blacklist().Check(ctx, credential); err != nil {
+		return nil, err
+	}
+
+	account, err := t.createAccount(ctx, &Account{Username: username}, credential)
+	if err != nil {
+		return nil, err
+	}
+
+	err = t.repos.Accounts().SetPasswordHash(ctx, account.ID, username, hash)
+	if err != nil {
 		return nil, err
 	}
 	return account, nil
+}
+
+// SetPassword 在宿主事务内维护密码；调用方负责账号操作权限，用户名一旦确定不可更改。
+func (t *Transaction) SetPassword(ctx context.Context, input SetPasswordInput) error {
+	if !validToken(input.AccountID) || !validPassword(input.Password, 8) {
+		return ErrInvalidInput
+	}
+	accountID := strings.ToLower(input.AccountID)
+	account, err := t.repos.Accounts().GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	username := input.Username
+	if username == "" {
+		username = account.Username
+	}
+	username, err = NormalizeUsername(username)
+	if err != nil {
+		return err
+	}
+	if account.Username != "" && account.Username != username {
+		return ErrConflict
+	}
+
+	hash, err := hashPassword(input.Password)
+	if err != nil {
+		return err
+	}
+
+	// 检查密码黑名单
+	err = t.repos.Blacklist().Check(
+		ctx,
+		Credential{
+			Method:     MethodPassword,
+			Identifier: username,
+		})
+	if err != nil {
+		return err
+	}
+
+	err = t.repos.Blacklist().CheckAccount(ctx, accountID)
+	if err != nil {
+		return err
+	}
+
+	// 初次设密可能与另一请求并发，账号锁内再次检查用户名所有权。
+	err = t.repos.Accounts().SetUsername(ctx, accountID, username)
+	if err != nil {
+		return err
+	}
+
+	err = t.repos.Accounts().SetPasswordHash(ctx, accountID, username, hash)
+	if err != nil {
+		return err
+	}
+
+	return t.repos.Sessions().DeleteByAccount(ctx, accountID)
+}
+
+// LoginPassword 在宿主事务内验证密码；Rejected 必须提交以保留尝试次数。
+func (t *Transaction) LoginPassword(ctx context.Context, input PasswordLoginInput) (Outcome, error) {
+	return t.loginPassword(ctx, input, "")
+}
+
+// loginPassword 在账号锁内读取并验证当前密码，再创建允许交付的会话。
+func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInput, requiredAccountID string) (Outcome, error) {
+	if !validPassword(input.Password, 1) || len(input.IP) > 512 {
+		return Outcome{}, ErrInvalidInput
+	}
+	credential := Credential{Method: MethodPassword}
+	var err error
+	if strings.Contains(input.Identifier, "@") {
+		credential.Method = MethodEmail
+		credential.Identifier, err = NormalizeEmail(input.Identifier)
+	} else {
+		credential.Identifier, err = NormalizeUsername(input.Identifier)
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	var account *Account
+	if credential.Method == MethodEmail {
+		account, err = t.repos.Accounts().GetByEmail(ctx, credential.Identifier)
+	} else {
+		account, err = t.repos.Accounts().GetByUsername(ctx, credential.Identifier)
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return Outcome{}, err
+	}
+	// 两种别名按账号 ID 共用额度，未知标识也保留自己的尝试次数。
+	rateKey := "password-identifier:" + credential.Method + ":" + credential.Identifier
+	if account != nil {
+		rateKey = "password-account:" + account.ID
+	}
+	now := t.now().UTC()
+	if err := t.repos.Rates().Hit(ctx, digest("password-ip:"+input.IP), now, PasswordIPRateLimit); err != nil {
+		return passwordRejection(err)
+	}
+	if err := t.repos.Rates().Hit(ctx, digest(rateKey), now, PasswordAccountRateLimit); err != nil {
+		return passwordRejection(err)
+	}
+	if err := t.repos.Blacklist().Check(ctx, credential); err != nil {
+		return passwordRejection(err)
+	}
+	if credential.Method == MethodEmail && account != nil && account.Username != "" {
+		if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodPassword, Identifier: account.Username}); err != nil {
+			return passwordRejection(err)
+		}
+	}
+	if account == nil {
+		return rejectPasswordCredentials(input.Password)
+	}
+	if err := t.repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
+		return passwordRejection(err)
+	}
+	account, err = t.repos.Accounts().GetByID(ctx, account.ID)
+	if errors.Is(err, ErrNotFound) {
+		return rejectPasswordCredentials(input.Password)
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	if credential.Method == MethodEmail && account.Email != credential.Identifier ||
+		credential.Method == MethodPassword && account.Username != credential.Identifier {
+		return rejectPasswordCredentials(input.Password)
+	}
+	hash, err := t.repos.Accounts().GetPasswordHash(ctx, account.ID)
+	if errors.Is(err, ErrNotFound) {
+		return rejectPasswordCredentials(input.Password)
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	if !verifyPassword(input.Password, hash) || requiredAccountID != "" && account.ID != requiredAccountID {
+		return Outcome{Rejected: ErrInvalidCredentials}, nil
+	}
+	return t.finishLogin(ctx, account, nil, false, now)
 }
 
 // finishLogin 消费可选的邮箱证明，并且只持久化令牌摘要。
@@ -170,6 +356,9 @@ func (t *Transaction) finishLogin(
 	created bool,
 	now time.Time,
 ) (Outcome, error) {
+	if err := t.repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
+		return Outcome{}, err
+	}
 	if challenge != nil {
 		challenge.Ready = false
 		if err := t.repos.Challenges().Save(ctx, challenge); err != nil {
@@ -217,5 +406,11 @@ func authenticate(
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrUnauthorized
 	}
-	return user, err
+	if err != nil {
+		return nil, err
+	}
+	if err := repos.Blacklist().CheckAccount(ctx, user.ID); err != nil {
+		return nil, err
+	}
+	return user, nil
 }

@@ -3,6 +3,7 @@ package authkit
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -16,15 +17,15 @@ type Service struct {
 	now          func() time.Time
 }
 
-// NewService 校验必需依赖。WechatExchanger 为 nil 时关闭微信换取；RegistrationPolicy 为 nil 时拒绝创建账号，但允许登录。
+// NewService 校验存储依赖。CodeSender 或 WechatExchanger 为 nil 时关闭对应渠道；RegistrationPolicy 为 nil 时拒绝创建账号，但允许登录。
 func NewService(
 	store Store,
 	sender CodeSender,
 	wechat WechatExchanger,
 	registration RegistrationPolicy,
 ) (*Service, error) {
-	if store == nil || sender == nil {
-		return nil, errors.New("authkit: store and code sender are required")
+	if store == nil {
+		return nil, errors.New("authkit: store is required")
 	}
 	return &Service{
 		store:        store,
@@ -44,6 +45,9 @@ func (s *Service) InTransaction(repos Repositories, policy RegistrationPolicy) *
 // SendCode 先持久化待发送验证码，在事务外发送，再只激活同一条验证码。
 // 投递失败会使验证码不可用，并保留限流计数。
 func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
+	if s.sender == nil {
+		return ErrEmailUnavailable
+	}
 	email, err := NormalizeEmail(input.Email)
 	if err != nil {
 		return err
@@ -59,6 +63,12 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 		Sent: now, Expires: now.Add(CodeTTL),
 	}
 	err = s.store.WithTransaction(ctx, func(repos Repositories) error {
+		if err := repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
+			return err
+		}
+		if err := checkEmailAccount(ctx, repos, email); err != nil {
+			return err
+		}
 		old, err := repos.Challenges().Get(ctx, email)
 		if err != nil {
 			return err
@@ -88,6 +98,12 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	}
 
 	return s.store.WithTransaction(ctx, func(repos Repositories) error {
+		if err := repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
+			return err
+		}
+		if err := checkEmailAccount(ctx, repos, email); err != nil {
+			return err
+		}
 		current, err := repos.Challenges().Find(ctx, email)
 		if err != nil {
 			return err
@@ -155,6 +171,44 @@ func (s *Service) LoginWechat(
 // Authenticate 解析仍然有效的应用令牌。它不授权宿主资源。
 func (s *Service) Authenticate(ctx context.Context, token string) (*Account, error) {
 	return authenticate(ctx, s.store, token, s.now().UTC())
+}
+
+// CreatePasswordAccount 由可信宿主创建已准入的密码账号，不创建会话。
+func (s *Service) CreatePasswordAccount(ctx context.Context, input CreatePasswordAccountInput) (*Account, error) {
+	var account *Account
+	err := s.store.WithTransaction(ctx, func(repos Repositories) error {
+		var err error
+		account, err = s.InTransaction(repos, s.registration).CreatePasswordAccount(ctx, input)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return account, nil
+}
+
+// SetPassword 由可信宿主开通或重置密码，并在同一事务内撤销全部会话。
+func (s *Service) SetPassword(ctx context.Context, input SetPasswordInput) error {
+	return s.store.WithTransaction(ctx, func(repos Repositories) error {
+		return s.InTransaction(repos, s.registration).SetPassword(ctx, input)
+	})
+}
+
+// LoginPassword 使用用户名或已绑定邮箱登录已有密码账号，不自动注册。
+func (s *Service) LoginPassword(ctx context.Context, input PasswordLoginInput) (*LoginResult, error) {
+	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
+		return tx.LoginPassword(ctx, input)
+	})
+}
+
+// AdminLoginPassword 在创建会话前校验指定管理员，拒绝时提交限流且不留下会话。
+func (s *Service) AdminLoginPassword(ctx context.Context, adminAccountID string, input PasswordLoginInput) (*LoginResult, error) {
+	if !validToken(adminAccountID) {
+		return nil, ErrInvalidInput
+	}
+	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
+		return tx.loginPassword(ctx, input, strings.ToLower(adminAccountID))
+	})
 }
 
 // Logout 幂等地撤销一个会话；凭证格式错误或缺失时不做任何事。

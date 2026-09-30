@@ -1,4 +1,4 @@
-// Package authkit 提供邮箱验证码与微信小程序登录。
+// Package authkit 提供邮箱验证码、账号密码与微信小程序登录。
 // 宿主负责 HTTP 传输、注册准入和业务授权。
 package authkit
 
@@ -11,10 +11,16 @@ const (
 	SessionTTL     = 30 * 24 * time.Hour
 	EmailRateLimit = 10
 	IPRateLimit    = 30
+	// PasswordAccountRateLimit 限制每账号每小时的密码登录尝试次数。
+	PasswordAccountRateLimit = 20
+	// PasswordIPRateLimit 限制每 IP 每小时的密码登录尝试次数。
+	PasswordIPRateLimit = 100
 	// MethodEmail 标识邮箱凭证。
 	MethodEmail = "email"
 	// MethodWechat 标识 OpenID 凭证。
 	MethodWechat = "wechat"
+	// MethodPassword 标识以用户名绑定的密码凭证。
+	MethodPassword = "password"
 )
 
 // Account 是登录主体。尚未绑定邮箱凭证时 Email 为空，尚未分配用户名时 Username 为空。
@@ -63,6 +69,26 @@ type SendCodeInput struct {
 type EmailLoginInput struct {
 	Email string
 	Code  string
+}
+
+// CreatePasswordAccountInput 由可信宿主提供新账号的用户名和密码。
+type CreatePasswordAccountInput struct {
+	Username string
+	Password string
+}
+
+// SetPasswordInput 为已有账号开通或重置密码，首次赋予用户名时 Username 必填。
+type SetPasswordInput struct {
+	AccountID string
+	Username  string
+	Password  string
+}
+
+// PasswordLoginInput 用用户名或已绑定邮箱及密码证明身份，IP 由宿主取得。
+type PasswordLoginInput struct {
+	Identifier string
+	Password   string
+	IP         string
 }
 
 // Registration 只在即将创建新账号时交给策略。

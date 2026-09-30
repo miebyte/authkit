@@ -2,6 +2,7 @@
 //
 //	POST   /auth/email/codes    {"email"}
 //	POST   /auth/email/login    {"email","code"}
+//	POST   /auth/password/login {"identifier","password"}
 //	POST   /auth/wechat/login   {"code"}
 //	GET    /auth/session        Authorization: Bearer
 //	DELETE /auth/session        Authorization: Bearer
@@ -31,6 +32,7 @@ func NewHandler(service *authkit.Service) *Handler {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/email/codes", h.sendEmailCode)
 	mux.HandleFunc("POST /auth/email/login", h.loginEmail)
+	mux.HandleFunc("POST /auth/password/login", h.loginPassword)
 	mux.HandleFunc("POST /auth/wechat/login", h.loginWechat)
 	mux.HandleFunc("GET /auth/session", h.session)
 	mux.HandleFunc("DELETE /auth/session", h.logout)
@@ -64,6 +66,25 @@ func (h *Handler) loginEmail(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.LoginEmail(r.Context(), authkit.EmailLoginInput{
 		Email: body.Email,
 		Code:  body.Code,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionFrom(result))
+}
+
+// loginPassword 接受 {"identifier","password"} 并返回已有账号的会话。
+func (h *Handler) loginPassword(w http.ResponseWriter, r *http.Request) {
+	var body passwordLoginRequest
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := h.service.LoginPassword(r.Context(), authkit.PasswordLoginInput{
+		Identifier: body.Identifier,
+		Password:   body.Password,
+		IP:         clientIP(r),
 	})
 	if err != nil {
 		writeError(w, err)

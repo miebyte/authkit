@@ -32,6 +32,7 @@ const isLastBinding = computed(() => props.account?.bindings.length === 1)
 function bindingName(method: string): string {
   if (method === 'wechat') return '微信'
   if (method === 'email') return '邮箱'
+  if (method === 'password') return '账号密码'
   return method || '其他方式'
 }
 

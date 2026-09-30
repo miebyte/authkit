@@ -1,4 +1,4 @@
-const pagePaths = new Set(['login', 'overview', 'accounts'])
+const pagePaths = new Set(['login', 'overview', 'accounts', 'blacklist'])
 
 export function resolveAppBase(pathname: string): string {
   const segments = pathname.split('/').filter(Boolean)

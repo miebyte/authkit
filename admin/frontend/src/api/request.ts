@@ -9,7 +9,9 @@ interface RequestOptions {
 
 const errorMessages: Record<string, string> = {
   forbidden: '没有权限执行此操作。',
-  unauthorized: '登录已失效，请重新验证邮箱。',
+  blacklisted: '该账号或登录凭证已被加入黑名单。',
+  unauthorized: '登录已失效，请重新登录。',
+  invalid_credentials: '账号或密码错误，请检查后重试。',
   invalid_input: '输入内容有误，请检查后重试。',
   invalid_email: '邮箱地址格式不正确。',
   invalid_code: '验证码无效，请检查后重试。',
@@ -23,6 +25,7 @@ const errorMessages: Record<string, string> = {
   last_binding: '不能解除最后一种登录方式。',
   conflict: '当前状态不允许此操作，请刷新后重试。',
   mail_failed: '验证码邮件发送失败，请稍后重试。',
+  email_unavailable: '邮箱验证码登录暂不可用，请使用账号密码登录。',
   internal: '服务器暂时无法处理请求，请稍后重试。',
 }
 

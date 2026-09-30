@@ -31,6 +31,7 @@ const adminName = computed(() =>
       <nav class="side-nav" aria-label="页面">
         <RouterLink class="nav-link" active-class="is-active" to="/overview">概览</RouterLink>
         <RouterLink class="nav-link" active-class="is-active" to="/accounts">账号管理</RouterLink>
+        <RouterLink class="nav-link" active-class="is-active" to="/blacklist">黑名单</RouterLink>
       </nav>
 
       <div class="sidebar-account">

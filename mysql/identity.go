@@ -10,10 +10,105 @@ import (
 	"github.com/miebyte/authkit/mysql/models"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 // accountRepository 持久化账号及其凭证绑定。
 type accountRepository struct{ db *gorm.DB }
+
+// GetByID 返回指定账号及其当前邮箱绑定。
+func (r *accountRepository) GetByID(ctx context.Context, id string) (*authkit.Account, error) {
+	return r.findAccount(ctx, id, false)
+}
+
+// GetByUsername 按区分大小写的用户名返回账号。
+func (r *accountRepository) GetByUsername(ctx context.Context, username string) (*authkit.Account, error) {
+	var m models.Account
+	if err := r.db.WithContext(ctx).Where("username = ?", username).Take(&m).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return r.withEmail(ctx, &m)
+}
+
+// SetUsername 只为已锁定的账号首次赋值，或保留完全相同的用户名。
+func (r *accountRepository) SetUsername(ctx context.Context, accountID, username string) error {
+	if username == "" {
+		return authkit.ErrInvalidInput
+	}
+	var account models.Account
+	err := r.db.WithContext(ctx).
+		Select("id", "username").
+		Where("id = ?", accountID).
+		Take(&account).Error
+	if err != nil {
+		return mapError(err)
+	}
+	if account.Username != nil && *account.Username != "" {
+		if *account.Username != username {
+			return authkit.ErrConflict
+		}
+		return nil
+	}
+	return mapError(
+		r.db.WithContext(ctx).
+			Model(&models.Account{}).
+			Where("id = ? AND (username IS NULL OR username = '')", accountID).
+			Update("username", username).Error,
+	)
+}
+
+// GetPasswordHash 读取已锁定账号的密码摘要；没有可用密码时返回 ErrNotFound。
+func (r *accountRepository) GetPasswordHash(ctx context.Context, accountID string) (string, error) {
+	var binding models.Binding
+	if err := r.db.WithContext(ctx).
+		Select("password_hash").
+		Where("account_id = ? AND method = ?", accountID, authkit.MethodPassword).
+		Take(&binding).Error; err != nil {
+		return "", mapError(err)
+	}
+	if binding.PasswordHash == nil || *binding.PasswordHash == "" {
+		return "", authkit.ErrNotFound
+	}
+	return *binding.PasswordHash, nil
+}
+
+// SetPasswordHash 为已锁定的账号开通或重置密码，用户名必须与账号保持一致。
+func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, username, hash string) error {
+	if username == "" || hash == "" {
+		return authkit.ErrInvalidInput
+	}
+	// 密码摘要不能进入宿主配置的 GORM SQL 日志；该 Session 仍使用同一个事务。
+	db := r.db.WithContext(ctx).Session(&gorm.Session{Logger: logger.Discard})
+	var account models.Account
+	err := db.Select("id", "username").
+		Where("id = ?", accountID).
+		Take(&account).Error
+	if err != nil {
+		return mapError(err)
+	}
+	if account.Username == nil || *account.Username != username {
+		return authkit.ErrConflict
+	}
+	var binding models.Binding
+	err = db.Select("identifier").
+		Where("account_id = ? AND method = ?", accountID, authkit.MethodPassword).
+		Take(&binding).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// 唯一冲突只返回错误，不能通过 upsert 修改另一账号的密码。
+		return mapError(db.Create(&models.Binding{
+			Method: authkit.MethodPassword, Identifier: username, AccountID: &accountID, PasswordHash: &hash,
+		}).Error)
+	}
+	if err != nil {
+		return mapError(err)
+	}
+	if binding.Identifier != username {
+		return authkit.ErrConflict
+	}
+	return mapError(db.Model(&models.Binding{}).
+		Where("account_id = ? AND method = ? AND identifier = ?", accountID, authkit.MethodPassword, username).
+		Update("password_hash", hash).Error)
+}
 
 // GetByEmail 返回绑定到规范化邮箱地址的账号。
 func (r *accountRepository) GetByEmail(
@@ -59,8 +154,9 @@ func (r *accountRepository) Create(
 	account *authkit.Account,
 	credential authkit.Credential,
 ) error {
-	if err := mapError(r.db.WithContext(ctx).Create(accountModel(account)).Error); err != nil {
-		return err
+	err := r.db.WithContext(ctx).Create(accountModel(account)).Error
+	if err != nil {
+		return mapError(err)
 	}
 	return r.createCredential(ctx, account.ID, credential)
 }
@@ -116,16 +212,6 @@ func (r *accountRepository) findBinding(
 	return &binding, nil
 }
 
-// accountModel 把公开账号映射为数据行。空用户名存为 NULL。
-func accountModel(account *authkit.Account) *models.Account {
-	m := &models.Account{ID: account.ID}
-	if account.Username != "" {
-		username := account.Username
-		m.Username = &username
-	}
-	return m
-}
-
 // withEmail 用账号的邮箱绑定填充邮箱投影。
 func (r *accountRepository) withEmail(
 	ctx context.Context,
@@ -150,7 +236,8 @@ func (r *accountRepository) createCredential(
 	accountID string,
 	credential authkit.Credential,
 ) error {
-	res := r.db.WithContext(ctx).Model(&models.Binding{}).
+	res := r.db.WithContext(ctx).
+		Model(&models.Binding{}).
 		Where(
 			"method = ? AND identifier = ? AND account_id IS NULL",
 			credential.Method,
@@ -246,4 +333,20 @@ func (r *sessionRepository) Create(ctx context.Context, s *authkit.Session) erro
 func (r *sessionRepository) Delete(ctx context.Context, hash string) error {
 	return mapError(r.db.WithContext(ctx).Where("hash = ?", hash).
 		Delete(&models.Session{}).Error)
+}
+
+// DeleteByAccount 撤销指定账号的全部会话；调用方须先锁定账号。
+func (r *sessionRepository) DeleteByAccount(ctx context.Context, accountID string) error {
+	return mapError(r.db.WithContext(ctx).Where("account_id = ?", accountID).
+		Delete(&models.Session{}).Error)
+}
+
+// accountModel 把公开账号映射为数据行。空用户名存为 NULL。
+func accountModel(account *authkit.Account) *models.Account {
+	m := &models.Account{ID: account.ID}
+	if account.Username != "" {
+		username := account.Username
+		m.Username = &username
+	}
+	return m
 }

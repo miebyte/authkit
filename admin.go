@@ -27,6 +27,7 @@ type AdminAccountSummary struct {
 	Username       string `json:"username"`
 	Email          string `json:"email"`
 	Wechat         bool   `json:"wechat"`
+	Password       bool   `json:"password"`
 	ActiveSessions int64  `json:"active_sessions"`
 }
 

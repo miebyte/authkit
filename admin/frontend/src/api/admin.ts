@@ -7,6 +7,9 @@ import type {
   AdminBindingInfo,
   AdminOverview,
   AdminSessionInfo,
+  BlacklistEntry,
+  BlacklistMethod,
+  BlacklistPage,
   LoginResult,
 } from '@/types/admin'
 
@@ -72,12 +75,13 @@ function parseOverview(value: unknown): AdminOverview {
 
 function parseSummary(value: unknown): AdminAccountSummary {
   const data = asRecord(value)
-  if (typeof data.wechat !== 'boolean') return invalidResponse()
+  if (typeof data.wechat !== 'boolean' || typeof data.password !== 'boolean') return invalidResponse()
   return {
     id: asID(data.id),
     username: asString(data.username),
     email: asString(data.email),
     wechat: data.wechat,
+    password: data.password,
     active_sessions: asCount(data.active_sessions),
   }
 }
@@ -118,6 +122,38 @@ function parseDetail(value: unknown): AdminAccountDetail {
   }
 }
 
+function parseBlacklistEntry(value: unknown): BlacklistEntry {
+  const data = asRecord(value)
+  if (data.method !== 'email' && data.method !== 'wechat' && data.method !== 'password') return invalidResponse()
+  const createdAt = asString(data.created_at)
+  if (Number.isNaN(Date.parse(createdAt))) return invalidResponse()
+  return {
+    id: asID(data.id),
+    method: data.method,
+    identifier: asString(data.identifier),
+    created_at: createdAt,
+  }
+}
+
+export async function listBlacklist(page: number, limit = 20): Promise<BlacklistPage> {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) })
+  const data = asRecord(await request(`api/blacklist?${params}`))
+  return {
+    items: asArray(data.items).map(parseBlacklistEntry),
+    total: asCount(data.total),
+    page: asPositiveInt(data.page),
+    limit: asPositiveInt(data.limit),
+  }
+}
+
+export async function addBlacklist(method: BlacklistMethod, identifier: string): Promise<void> {
+  await request('api/blacklist', { method: 'POST', body: { method, identifier } })
+}
+
+export async function removeBlacklist(id: string): Promise<void> {
+  await request(`api/blacklist/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
 export async function getMe(): Promise<AccountIdentity> {
   return parseIdentity(await request('api/me'))
 }
@@ -130,6 +166,15 @@ export async function login(email: string, code: string): Promise<LoginResult> {
   const data = asRecord(await request('api/login', {
     method: 'POST',
     body: { email, code },
+    auth: false,
+  }))
+  return { token: asID(data.token), account: parseIdentity(data.account) }
+}
+
+export async function loginPassword(identifier: string, password: string): Promise<LoginResult> {
+  const data = asRecord(await request('api/password/login', {
+    method: 'POST',
+    body: { identifier, password },
     auth: false,
   }))
   return { token: asID(data.token), account: parseIdentity(data.account) }

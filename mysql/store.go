@@ -58,6 +58,9 @@ func (s *Store) Rates() authkit.RateRepository { return &rateRepository{db: s.db
 // Sessions 返回应用会话仓储。
 func (s *Store) Sessions() authkit.SessionRepository { return &sessionRepository{db: s.db} }
 
+// Blacklist 返回凭证黑名单仓储。
+func (s *Store) Blacklist() authkit.BlacklistRepository { return &blacklistRepository{db: s.db} }
+
 // mapError 保留宿主错误，并把可移植的查找失败和唯一约束失败映射为模块错误。
 func mapError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {

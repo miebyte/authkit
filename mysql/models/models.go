@@ -15,9 +15,10 @@ func (Account) TableName() string { return "auth_accounts" }
 // Binding 把一条唯一凭证挂到账号上，例如邮箱、手机号或 OpenID。
 // 所有者为空时，可在选定账号之前锁定该凭证。
 type Binding struct {
-	Method     string  `gorm:"column:method;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey;uniqueIndex:account_method,priority:2"`
-	Identifier string  `gorm:"column:identifier;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	AccountID  *string `gorm:"column:account_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:account_method,priority:1"`
+	Method       string  `gorm:"column:method;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey;uniqueIndex:account_method,priority:2"`
+	Identifier   string  `gorm:"column:identifier;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
+	AccountID    *string `gorm:"column:account_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:account_method,priority:1"`
+	PasswordHash *string `gorm:"column:password_hash;type:varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin" json:"-"`
 }
 
 // TableName 返回凭证绑定表名。
@@ -56,7 +57,19 @@ type Session struct {
 // TableName 返回应用会话表名。
 func (Session) TableName() string { return "auth_sessions" }
 
+// Blacklist 串行化凭证禁用与登录检查，解除后保留占位行。
+type Blacklist struct {
+	ID         string    `gorm:"column:id;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
+	Method     string    `gorm:"column:method;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;uniqueIndex:blacklist_credential,priority:1"`
+	Identifier string    `gorm:"column:identifier;type:varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;uniqueIndex:blacklist_credential,priority:2"`
+	Blocked    bool      `gorm:"column:blocked;type:tinyint(1);not null"`
+	CreatedAt  time.Time `gorm:"column:created_at;type:datetime(6);not null"`
+}
+
+// TableName 返回凭证黑名单表名。
+func (Blacklist) TableName() string { return "auth_blacklist" }
+
 // AllModels 返回新的模型值，供宿主显式调用 AutoMigrate。
 func AllModels() []any {
-	return []any{&Account{}, &Binding{}, &Challenge{}, &Rate{}, &Session{}}
+	return []any{&Account{}, &Binding{}, &Challenge{}, &Rate{}, &Session{}, &Blacklist{}}
 }

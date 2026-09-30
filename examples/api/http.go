@@ -20,6 +20,12 @@ type emailLoginRequest struct {
 	Code  string `json:"code"`
 }
 
+// passwordLoginRequest 是 POST /auth/password/login 的请求体。
+type passwordLoginRequest struct {
+	Identifier string `json:"identifier"`
+	Password   string `json:"password"`
+}
+
 // wechatLoginRequest 是 POST /auth/wechat/login 的请求体。
 type wechatLoginRequest struct {
 	Code string `json:"code"`
@@ -103,6 +109,10 @@ func httpStatus(err error) (int, string) {
 		return http.StatusTooManyRequests, "too_many_requests"
 	case errors.Is(err, authkit.ErrUnauthorized):
 		return http.StatusUnauthorized, "unauthorized"
+	case errors.Is(err, authkit.ErrInvalidCredentials):
+		return http.StatusUnauthorized, "invalid_credentials"
+	case errors.Is(err, authkit.ErrBlacklisted):
+		return http.StatusForbidden, "blacklisted"
 	case errors.Is(err, authkit.ErrRegistrationDenied):
 		return http.StatusForbidden, "registration_denied"
 	case errors.Is(err, authkit.ErrChallengeUpdated):
@@ -117,6 +127,8 @@ func httpStatus(err error) (int, string) {
 		return http.StatusBadGateway, "wechat_login"
 	case errors.Is(err, authkit.ErrWechatUnavailable):
 		return http.StatusServiceUnavailable, "wechat_unavailable"
+	case errors.Is(err, authkit.ErrEmailUnavailable):
+		return http.StatusServiceUnavailable, "email_unavailable"
 	default:
 		return http.StatusInternalServerError, "internal"
 	}

@@ -21,6 +21,7 @@ export interface AdminAccountSummary {
   username: string
   email: string
   wechat: boolean
+  password: boolean
   active_sessions: number
 }
 
@@ -47,4 +48,20 @@ export interface AdminAccountDetail {
   email: string
   bindings: AdminBindingInfo[]
   sessions: AdminSessionInfo[]
+}
+
+export type BlacklistMethod = 'email' | 'wechat' | 'password'
+
+export interface BlacklistEntry {
+  id: string
+  method: BlacklistMethod
+  identifier: string
+  created_at: string
+}
+
+export interface BlacklistPage {
+  items: BlacklistEntry[]
+  total: number
+  page: number
+  limit: number
 }
