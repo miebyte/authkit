@@ -10,11 +10,12 @@ import (
 // Service 编排独立的身份事务和验证码投递。
 // 身份写入必须与宿主业务写入一起提交时，使用 InTransaction。
 type Service struct {
-	store        Store
-	sender       CodeSender
-	wechat       WechatExchanger
-	registration RegistrationPolicy
-	now          func() time.Time
+	store             Store
+	sender            CodeSender
+	wechat            WechatExchanger
+	registration      RegistrationPolicy
+	now               func() time.Time
+	passwordAlgorithm PasswordAlgorithm
 }
 
 // NewService 校验存储依赖。CodeSender 或 WechatExchanger 为 nil 时关闭对应渠道；RegistrationPolicy 为 nil 时拒绝创建账号，但允许登录。
@@ -23,23 +24,29 @@ func NewService(
 	sender CodeSender,
 	wechat WechatExchanger,
 	registration RegistrationPolicy,
+	configs ...Config,
 ) (*Service, error) {
+	config, err := normalizeConfig(configs)
+	if err != nil {
+		return nil, err
+	}
 	if store == nil {
 		return nil, errors.New("authkit: store is required")
 	}
 	return &Service{
-		store:        store,
-		sender:       sender,
-		wechat:       wechat,
-		registration: registration,
-		now:          time.Now,
+		store:             store,
+		sender:            sender,
+		wechat:            wechat,
+		registration:      registration,
+		now:               time.Now,
+		passwordAlgorithm: config.PasswordAlgorithm,
 	}, nil
 }
 
 // InTransaction 把身份操作绑定到已经处于宿主事务中的仓储。
 // 它不会开启或提交事务。传入的策略会替换独立策略，其写入必须使用同一个宿主事务。
 func (s *Service) InTransaction(repos Repositories, policy RegistrationPolicy) *Transaction {
-	return &Transaction{repos: repos, registration: policy, now: s.now}
+	return &Transaction{repos: repos, registration: policy, now: s.now, passwordAlgorithm: s.passwordAlgorithm}
 }
 
 // SendCode 先持久化待发送验证码，在事务外发送，再只激活同一条验证码。
@@ -194,7 +201,7 @@ func (s *Service) SetPassword(ctx context.Context, input SetPasswordInput) error
 	})
 }
 
-// LoginPassword 使用用户名或已绑定邮箱登录已有密码账号，不自动注册。
+// LoginPassword 使用密码绑定的用户名或邮箱登录已有密码账号，不自动注册。
 func (s *Service) LoginPassword(ctx context.Context, input PasswordLoginInput) (*LoginResult, error) {
 	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
 		return tx.LoginPassword(ctx, input)

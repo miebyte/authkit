@@ -423,6 +423,7 @@ type blacklistMemoryStore struct {
 	rates             map[string]blacklistRate
 	checkError        error
 	accountCheckError error
+	accountCheckHook  func(string)
 	challengeReads    int
 }
 
@@ -468,30 +469,17 @@ func (r blacklistAccounts) GetByID(_ context.Context, id string) (*Account, erro
 	return &account, nil
 }
 
-func (r blacklistAccounts) GetByUsername(_ context.Context, username string) (*Account, error) {
-	for _, account := range r.store.accounts {
-		if account.Username == username {
-			return &account, nil
-		}
-	}
-	return nil, ErrNotFound
+func (r blacklistAccounts) GetByPasswordIdentifier(_ context.Context, identifier string) (*Account, error) {
+	return r.lookup(Credential{Method: MethodPassword, Identifier: identifier})
 }
 
-func (r blacklistAccounts) SetUsername(ctx context.Context, id, username string) error {
-	account, err := r.GetByID(ctx, id)
-	if err != nil {
-		return err
+func (r blacklistAccounts) GetPasswordIdentifier(_ context.Context, accountID string) (string, error) {
+	for key, owner := range r.store.bindings {
+		if owner == accountID && strings.HasPrefix(key, MethodPassword+"\x00") {
+			return strings.TrimPrefix(key, MethodPassword+"\x00"), nil
+		}
 	}
-	if account.Username != "" && account.Username != username {
-		return ErrConflict
-	}
-	other, err := r.GetByUsername(ctx, username)
-	if err == nil && other.ID != id {
-		return ErrConflict
-	}
-	account.Username = username
-	r.store.accounts[id] = *account
-	return nil
+	return "", ErrNotFound
 }
 
 func (r blacklistAccounts) lookup(credential Credential) (*Account, error) {
@@ -515,11 +503,6 @@ func (r blacklistAccounts) Create(_ context.Context, account *Account, credentia
 	key := blacklistCredentialKey(credential)
 	if _, ok := r.store.bindings[key]; ok {
 		return ErrConflict
-	}
-	for _, other := range r.store.accounts {
-		if account.Username != "" && other.Username == account.Username {
-			return ErrConflict
-		}
 	}
 	r.store.accounts[account.ID], r.store.bindings[key] = *account, account.ID
 	return nil
@@ -568,12 +551,12 @@ func (r blacklistAccounts) GetPasswordHash(_ context.Context, accountID string) 
 	return hash, nil
 }
 
-func (r blacklistAccounts) SetPasswordHash(_ context.Context, accountID, username, hash string) error {
-	key := blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: username})
+func (r blacklistAccounts) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+	key := blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: identifier})
 	if owner := r.store.bindings[key]; owner != "" && owner != accountID {
 		return ErrConflict
 	}
-	if r.store.accounts[accountID].Username != username {
+	if existing, err := r.GetPasswordIdentifier(ctx, accountID); err == nil && existing != identifier {
 		return ErrConflict
 	}
 	r.store.bindings[key], r.store.passwords[accountID] = accountID, hash
@@ -637,9 +620,8 @@ func (r blacklistRepository) CheckAccount(_ context.Context, accountID string) e
 	if r.store.accountCheckError != nil {
 		return r.store.accountCheckError
 	}
-	usernameKey := blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: r.store.accounts[accountID].Username})
-	if _, blocked := r.store.entries[usernameKey]; blocked {
-		return ErrBlacklisted
+	if r.store.accountCheckHook != nil {
+		r.store.accountCheckHook(accountID)
 	}
 	for key, owner := range r.store.bindings {
 		if owner == accountID {
@@ -655,13 +637,6 @@ func (r blacklistRepository) Add(_ context.Context, entry BlacklistEntry) error 
 	key := blacklistCredentialKey(Credential{Method: entry.Method, Identifier: entry.Identifier})
 	r.store.entries[key] = entry
 	accountID := r.store.bindings[key]
-	if entry.Method == MethodPassword {
-		for _, account := range r.store.accounts {
-			if account.Username == entry.Identifier {
-				accountID = account.ID
-			}
-		}
-	}
 	for hash, session := range r.store.sessions {
 		if session.AccountID == accountID {
 			delete(r.store.sessions, hash)

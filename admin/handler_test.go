@@ -41,12 +41,13 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 				testAdminID: {ID: testAdminID, Email: "admin@example.com"},
 				testUserID:  {ID: testUserID, Email: "user@example.com"},
 			},
-			challenges: make(map[string]authkit.Challenge),
-			sessions:   make(map[string]authkit.Session),
-			blacklist:  make(map[string]authkit.BlacklistEntry),
-			wechatIDs:  make(map[string]string),
-			passwords:  make(map[string]string),
-			rateHits:   make(map[string]int),
+			challenges:          make(map[string]authkit.Challenge),
+			sessions:            make(map[string]authkit.Session),
+			blacklist:           make(map[string]authkit.BlacklistEntry),
+			wechatIDs:           make(map[string]string),
+			passwords:           make(map[string]string),
+			passwordIdentifiers: make(map[string]string),
+			rateHits:            make(map[string]int),
 		},
 		mail: &handlerMail{},
 		mux:  http.NewServeMux(),
@@ -336,10 +337,13 @@ func TestOrdinaryAccountCannotLoginToConsole(t *testing.T) {
 	}
 }
 
-func (f *handlerFixture) setPassword(t *testing.T, accountID, username string) {
+func (f *handlerFixture) setPassword(t *testing.T, accountID, identifier string) {
 	t.Helper()
+	account := f.auth.accounts[accountID]
+	account.Username = identifier
+	f.auth.accounts[accountID] = account
 	if err := f.service.SetPassword(context.Background(), authkit.SetPasswordInput{
-		AccountID: accountID, Username: username, Password: "test-password-123",
+		AccountID: accountID, Identifier: identifier, Password: "test-password-123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -347,8 +351,8 @@ func (f *handlerFixture) setPassword(t *testing.T, accountID, username string) {
 
 func TestAdminPasswordLoginUsesConfiguredAccount(t *testing.T) {
 	f := newHandlerFixture(t)
-	f.setPassword(t, testAdminID, "admin")
-	for _, identifier := range []string{" admin ", " ADMIN@Example.com "} {
+	f.setPassword(t, testAdminID, "admin@example.com")
+	for _, identifier := range []string{" admin@example.com ", " ADMIN@Example.com "} {
 		body, err := json.Marshal(passwordLoginRequest{Identifier: identifier, Password: "test-password-123"})
 		if err != nil {
 			t.Fatal(err)
@@ -362,7 +366,7 @@ func TestAdminPasswordLoginUsesConfiguredAccount(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.Account.ID != testAdminID || result.Account.Username != "admin" || result.Token == "" {
+		if result.Account.ID != testAdminID || result.Account.Username != "admin@example.com" || result.Token == "" {
 			t.Fatalf("unexpected password login result: %+v", result.Account)
 		}
 		if strings.Contains(response.Body.String(), f.auth.passwords[testAdminID]) {
@@ -387,6 +391,32 @@ func TestPasswordOnlyAdminCanLogin(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"email":""`) {
 		t.Fatalf("password-only login response = %s", response.Body.String())
 	}
+}
+
+func TestAdminPasswordLoginIgnoresDisplayName(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.setPassword(t, testAdminID, "admin@example.com")
+	account := f.auth.accounts[testAdminID]
+	account.Username = "管理员"
+	f.auth.accounts[testAdminID] = account
+	for _, identifier := range []string{"admin@example.com", " ADMIN@EXAMPLE.COM "} {
+		response := f.request(http.MethodPost, "/authkit/admin/api/password/login",
+			`{"identifier":"`+identifier+`","password":"test-password-123"}`, "")
+		requireStatus(t, response, http.StatusOK)
+		var result struct {
+			Token   string          `json:"token"`
+			Account accountResponse `json:"account"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Account.ID != testAdminID || result.Account.Username != "管理员" || result.Token == "" {
+			t.Fatalf("renamed account login result = %+v", result.Account)
+		}
+	}
+	response := f.request(http.MethodPost, "/authkit/admin/api/password/login",
+		`{"identifier":"管理员","password":"test-password-123"}`, "")
+	requireStatus(t, response, http.StatusUnauthorized)
 }
 
 func TestAdminPasswordRejectsOtherAccountsWithoutSession(t *testing.T) {
@@ -445,6 +475,9 @@ func TestAdminPasswordRejectsBadJSONBeforeStorage(t *testing.T) {
 func TestAdminDisplaysAndDeletesPasswordBinding(t *testing.T) {
 	f := newHandlerFixture(t)
 	f.setPassword(t, testUserID, "user")
+	storedAccount := f.auth.accounts[testUserID]
+	storedAccount.Username = "用户"
+	f.auth.accounts[testUserID] = storedAccount
 	token := f.login(t, "admin@example.com")
 	response := f.request(http.MethodGet, "/authkit/admin/api/accounts/"+testUserID, "", token)
 	requireStatus(t, response, http.StatusOK)
@@ -455,15 +488,18 @@ func TestAdminDisplaysAndDeletesPasswordBinding(t *testing.T) {
 	if len(account.Bindings) != 2 || account.Bindings[1].Method != authkit.MethodPassword || account.Bindings[1].Identifier != "user" {
 		t.Fatalf("password binding projection = %+v", account.Bindings)
 	}
+	if account.Username != "用户" {
+		t.Fatalf("account display name = %q", account.Username)
+	}
 	if strings.Contains(response.Body.String(), f.auth.passwords[testUserID]) {
 		t.Fatal("account detail exposed a password hash")
 	}
 	requireStatus(t, f.request(http.MethodDelete,
 		"/authkit/admin/api/accounts/"+testUserID+"/bindings/password", "", token), http.StatusNoContent)
-	if f.auth.deletedBinding != testUserID+"/password" || f.auth.passwords[testUserID] != "" {
+	if f.auth.deletedBinding != testUserID+"/password" || f.auth.passwords[testUserID] != "" || f.auth.passwordIdentifiers[testUserID] != "" {
 		t.Fatal("handler did not remove the requested password credential")
 	}
-	if f.auth.accounts[testUserID].Username != "user" {
+	if f.auth.accounts[testUserID].Username != "用户" {
 		t.Fatal("removing a password changed the account username")
 	}
 }
@@ -592,6 +628,9 @@ func TestAdminManagesBlacklist(t *testing.T) {
 func TestAdminCannotBlacklistOwnCredentials(t *testing.T) {
 	f := newHandlerFixture(t)
 	f.setPassword(t, testAdminID, "admin")
+	account := f.auth.accounts[testAdminID]
+	account.Username = "管理员"
+	f.auth.accounts[testAdminID] = account
 	f.auth.wechatIDs[fmt.Sprintf("%x", sha256.Sum256([]byte("AdminOpenID")))] = testAdminID
 	token := f.login(t, "admin@example.com")
 	for _, body := range []string{
@@ -611,9 +650,28 @@ func TestAdminCannotBlacklistOwnCredentials(t *testing.T) {
 	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", token), http.StatusOK)
 }
 
+func TestAdminCanBlacklistDisplayNameWithoutBlockingAccount(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.setPassword(t, testAdminID, "admin")
+	account := f.auth.accounts[testAdminID]
+	account.Username = "管理员"
+	f.auth.accounts[testAdminID] = account
+	token := f.login(t, "admin@example.com")
+	requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/blacklist",
+		`{"method":"password","identifier":"管理员"}`, token), http.StatusNoContent)
+	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", token), http.StatusOK)
+	for _, identifier := range []string{"admin"} {
+		requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/password/login",
+			`{"identifier":"`+identifier+`","password":"test-password-123"}`, ""), http.StatusOK)
+	}
+}
+
 func TestAdminManagesPasswordBlacklist(t *testing.T) {
 	f := newHandlerFixture(t)
 	f.setPassword(t, testUserID, "user")
+	account := f.auth.accounts[testUserID]
+	account.Username = "用户"
+	f.auth.accounts[testUserID] = account
 	userToken := f.login(t, "user@example.com")
 	token := f.login(t, "admin@example.com")
 	requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/blacklist",
@@ -655,16 +713,17 @@ func TestNewHTTPHandlerRequiresConfiguredAccount(t *testing.T) {
 // handlerAuthStore 实现公开登录流程与后台操作使用的仓储替身。
 // 该流程一旦调用额外的仓储操作，嵌入的接口会立即失败。
 type handlerAuthStore struct {
-	accounts       map[string]authkit.Account
-	challenges     map[string]authkit.Challenge
-	sessions       map[string]authkit.Session
-	blacklist      map[string]authkit.BlacklistEntry
-	wechatIDs      map[string]string
-	passwords      map[string]string
-	rateHits       map[string]int
-	deletedBinding string
-	revokedSession string
-	revokedAll     string
+	accounts            map[string]authkit.Account
+	challenges          map[string]authkit.Challenge
+	sessions            map[string]authkit.Session
+	blacklist           map[string]authkit.BlacklistEntry
+	wechatIDs           map[string]string
+	passwords           map[string]string
+	passwordIdentifiers map[string]string
+	rateHits            map[string]int
+	deletedBinding      string
+	revokedSession      string
+	revokedAll          string
 }
 
 func (s *handlerAuthStore) WithTransaction(ctx context.Context, fn func(authkit.Repositories) error) error {
@@ -697,31 +756,21 @@ func (r handlerAccounts) GetByID(_ context.Context, id string) (*authkit.Account
 	return &account, nil
 }
 
-func (r handlerAccounts) GetByUsername(_ context.Context, username string) (*authkit.Account, error) {
-	for _, account := range r.store.accounts {
-		if account.Username == username {
-			return &account, nil
+func (r handlerAccounts) GetByPasswordIdentifier(ctx context.Context, identifier string) (*authkit.Account, error) {
+	for id, existing := range r.store.passwordIdentifiers {
+		if existing == identifier {
+			return r.GetByID(ctx, id)
 		}
 	}
 	return nil, authkit.ErrNotFound
 }
 
-func (r handlerAccounts) SetUsername(ctx context.Context, id, username string) error {
-	account, err := r.GetByID(ctx, id)
-	if err != nil {
-		return err
+func (r handlerAccounts) GetPasswordIdentifier(_ context.Context, accountID string) (string, error) {
+	identifier, ok := r.store.passwordIdentifiers[accountID]
+	if !ok {
+		return "", authkit.ErrNotFound
 	}
-	if account.Username != "" && account.Username != username {
-		return authkit.ErrConflict
-	}
-	for _, existing := range r.store.accounts {
-		if existing.ID != id && existing.Username == username {
-			return authkit.ErrConflict
-		}
-	}
-	account.Username = username
-	r.store.accounts[id] = *account
-	return nil
+	return identifier, nil
 }
 
 func (r handlerAccounts) GetPasswordHash(_ context.Context, accountID string) (string, error) {
@@ -732,7 +781,19 @@ func (r handlerAccounts) GetPasswordHash(_ context.Context, accountID string) (s
 	return hash, nil
 }
 
-func (r handlerAccounts) SetPasswordHash(_ context.Context, accountID, _, hash string) error {
+func (r handlerAccounts) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+	if _, err := r.GetByID(ctx, accountID); err != nil {
+		return err
+	}
+	if existing, ok := r.store.passwordIdentifiers[accountID]; ok && existing != identifier {
+		return authkit.ErrConflict
+	}
+	for id, existing := range r.store.passwordIdentifiers {
+		if id != accountID && existing == identifier {
+			return authkit.ErrConflict
+		}
+	}
+	r.store.passwordIdentifiers[accountID] = identifier
 	r.store.passwords[accountID] = hash
 	return nil
 }
@@ -778,7 +839,7 @@ func (r handlerBlacklist) CheckAccount(ctx context.Context, id string) error {
 		}
 	}
 	if _, ok := r.store.passwords[id]; ok {
-		if err := r.Check(ctx, authkit.Credential{Method: authkit.MethodPassword, Identifier: account.Username}); err != nil {
+		if err := r.Check(ctx, authkit.Credential{Method: authkit.MethodPassword, Identifier: r.store.passwordIdentifiers[id]}); err != nil {
 			return err
 		}
 	}
@@ -809,8 +870,8 @@ func (r handlerBlacklist) Add(_ context.Context, entry authkit.BlacklistEntry) e
 		}
 	}
 	if entry.Method == authkit.MethodPassword {
-		for id, account := range r.store.accounts {
-			if account.Username == entry.Identifier && r.store.passwords[id] != "" {
+		for id, identifier := range r.store.passwordIdentifiers {
+			if identifier == entry.Identifier && r.store.passwords[id] != "" {
 				accountID = id
 			}
 		}
@@ -941,7 +1002,7 @@ func (s *handlerAuthStore) AdminGetAccount(_ context.Context, id string, _ time.
 		bindings = append(bindings, authkit.AdminBindingInfo{Method: authkit.MethodEmail, Identifier: account.Email})
 	}
 	if s.passwords[id] != "" {
-		bindings = append(bindings, authkit.AdminBindingInfo{Method: authkit.MethodPassword, Identifier: account.Username})
+		bindings = append(bindings, authkit.AdminBindingInfo{Method: authkit.MethodPassword, Identifier: s.passwordIdentifiers[id]})
 	}
 	return authkit.AdminAccountDetail{ID: account.ID, Username: account.Username, Email: account.Email, Bindings: bindings}, nil
 }
@@ -950,6 +1011,7 @@ func (s *handlerAuthStore) AdminDeleteBinding(ctx context.Context, id, method st
 	s.deletedBinding = id + "/" + method
 	if method == authkit.MethodPassword {
 		delete(s.passwords, id)
+		delete(s.passwordIdentifiers, id)
 		return (handlerSessions{store: s}).DeleteByAccount(ctx, id)
 	}
 	return nil

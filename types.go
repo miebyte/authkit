@@ -19,11 +19,11 @@ const (
 	MethodEmail = "email"
 	// MethodWechat 标识 OpenID 凭证。
 	MethodWechat = "wechat"
-	// MethodPassword 标识以用户名绑定的密码凭证。
+	// MethodPassword 标识以登录标识绑定的密码凭证。
 	MethodPassword = "password"
 )
 
-// Account 是登录主体。尚未绑定邮箱凭证时 Email 为空，尚未分配用户名时 Username 为空。
+// Account 是登录主体。Username 仅用于展示，尚未绑定邮箱凭证时 Email 为空。
 type Account struct {
 	ID       string
 	Username string
@@ -71,20 +71,21 @@ type EmailLoginInput struct {
 	Code  string
 }
 
-// CreatePasswordAccountInput 由可信宿主提供新账号的用户名和密码。
+// CreatePasswordAccountInput 由可信宿主提供登录标识、密码和可选的展示名称。
 type CreatePasswordAccountInput struct {
-	Username string
-	Password string
+	Username   string
+	Identifier string
+	Password   string
 }
 
-// SetPasswordInput 为已有账号开通或重置密码，首次赋予用户名时 Username 必填。
+// SetPasswordInput 为已有账号开通或重置密码，首次开通时 Identifier 必填，不修改展示名称。
 type SetPasswordInput struct {
-	AccountID string
-	Username  string
-	Password  string
+	AccountID  string
+	Identifier string
+	Password   string
 }
 
-// PasswordLoginInput 用用户名或已绑定邮箱及密码证明身份，IP 由宿主取得。
+// PasswordLoginInput 用密码绑定的用户名或邮箱及密码证明身份，IP 由宿主取得。
 type PasswordLoginInput struct {
 	Identifier string
 	Password   string

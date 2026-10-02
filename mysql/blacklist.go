@@ -33,7 +33,7 @@ func (r *blacklistRepository) Check(ctx context.Context, credential authkit.Cred
 func (r *blacklistRepository) CheckAccount(ctx context.Context, accountID string) error {
 	var account models.Account
 	if err := r.db.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
-		Select("id", "username").Where("id = ?", accountID).Take(&account).Error; err != nil {
+		Select("id").Where("id = ?", accountID).Take(&account).Error; err != nil {
 		return mapError(err)
 	}
 	var count int64
@@ -45,17 +45,6 @@ func (r *blacklistRepository) CheckAccount(ctx context.Context, accountID string
 	}
 	if count > 0 {
 		return authkit.ErrBlacklisted
-	}
-	// 密码解绑仍保留用户名，不能通过删除绑定绕过已设定的用户名黑名单。
-	if account.Username != nil && *account.Username != "" {
-		if err := r.db.WithContext(ctx).Model(&models.Blacklist{}).
-			Where("method = ? AND identifier = ? AND blocked = ?", authkit.MethodPassword, *account.Username, true).
-			Count(&count).Error; err != nil {
-			return mapError(err)
-		}
-		if count > 0 {
-			return authkit.ErrBlacklisted
-		}
 	}
 	return nil
 }
@@ -78,21 +67,10 @@ func (r *blacklistRepository) Add(ctx context.Context, entry authkit.BlacklistEn
 		}
 	}
 	var binding models.Binding
-	if entry.Method == authkit.MethodPassword {
-		var account models.Account
-		if err := r.db.WithContext(ctx).Select("id").Where("username = ?", entry.Identifier).
-			Find(&account).Error; err != nil {
-			return mapError(err)
-		}
-		if account.ID != "" {
-			binding.AccountID = &account.ID
-		}
-	} else {
-		if err := r.db.WithContext(ctx).Select("account_id").
-			Where("method = ? AND identifier = ?", entry.Method, entry.Identifier).
-			Find(&binding).Error; err != nil {
-			return mapError(err)
-		}
+	if err := r.db.WithContext(ctx).Select("account_id").
+		Where("method = ? AND identifier = ?", entry.Method, entry.Identifier).
+		Find(&binding).Error; err != nil {
+		return mapError(err)
 	}
 	if binding.AccountID != nil {
 		var account models.Account

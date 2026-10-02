@@ -31,11 +31,11 @@ const removeMessage = computed(() => {
 })
 const identifierLabel = computed(() => method.value === 'email'
   ? '邮箱地址'
-  : method.value === 'password' ? '用户名' : '微信 OpenID')
+  : method.value === 'password' ? '密码登录标识' : '微信 OpenID')
 const identifierHint = computed(() => method.value === 'email'
   ? '邮箱会转换为小写并去除首尾空格。'
   : method.value === 'password'
-    ? '输入账号密码登录使用的用户名，区分大小写并去除首尾空格。'
+    ? '输入密码登录标识，区分大小写并去除首尾空格。'
     : 'OpenID 区分大小写，不能包含空白字符；列表仅显示条目 ID。')
 let listRequestId = 0
 
@@ -141,7 +141,7 @@ defineExpose({ refresh })
     <header class="page-heading">
       <p class="eyebrow">黑名单</p>
       <h1>限制登录与注册</h1>
-      <p>添加邮箱、账号密码用户名或微信 OpenID，阻止该凭证及其关联账号继续使用。未注册的凭证也可添加。</p>
+      <p>添加邮箱、密码登录标识或微信 OpenID，阻止该凭证及其关联账号继续使用。未注册的凭证也可添加。</p>
     </header>
 
     <div v-if="successMessage" class="status-message" role="status">{{ successMessage }}</div>
@@ -154,7 +154,7 @@ defineExpose({ refresh })
           <select id="blacklist-method" v-model="method" :disabled="busy" @change="changeMethod">
             <option value="email">邮箱</option>
             <option value="wechat">微信 OpenID</option>
-            <option value="password">账号密码用户名</option>
+            <option value="password">密码登录标识</option>
           </select>
         </div>
         <div class="identifier-field">
@@ -164,7 +164,7 @@ defineExpose({ refresh })
             v-model="identifier"
             :type="method === 'email' ? 'email' : 'text'"
             :maxlength="method === 'email' ? 254 : 128"
-            :placeholder="method === 'email' ? '例如 user@example.com' : method === 'password' ? '输入账号用户名' : '输入原始 OpenID'"
+            :placeholder="method === 'email' ? '例如 user@example.com' : method === 'password' ? '输入密码登录标识' : '输入原始 OpenID'"
             :disabled="busy"
             autocomplete="off"
             spellcheck="false"
@@ -199,14 +199,14 @@ defineExpose({ refresh })
           <thead>
             <tr>
               <th scope="col">类型</th>
-              <th scope="col">邮箱 / 用户名 / 条目 ID</th>
+              <th scope="col">邮箱 / 密码登录标识 / 条目 ID</th>
               <th scope="col">加入时间</th>
               <th scope="col" class="action-cell">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="entry in entries" :key="entry.id">
-              <td>{{ entry.method === 'email' ? '邮箱' : entry.method === 'password' ? '账号密码' : '微信' }}</td>
+              <td>{{ entry.method === 'email' ? '邮箱' : entry.method === 'password' ? '密码登录标识' : '微信' }}</td>
               <td>
                 <span v-if="entry.method !== 'wechat'" class="identifier" :title="entry.identifier">{{ entry.identifier }}</span>
                 <span v-else class="entry-id" :title="entry.id">{{ shortId(entry.id) }}</span>

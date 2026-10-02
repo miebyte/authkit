@@ -227,7 +227,7 @@ defineExpose({ refresh })
             id="account-query"
             v-model="draftQuery"
             type="search"
-            placeholder="搜索账号 ID、用户名或邮箱"
+            placeholder="搜索账号 ID、展示名称或邮箱"
             autocomplete="off"
           >
           <button class="button button-primary" type="submit">查询</button>

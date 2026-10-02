@@ -8,6 +8,8 @@ import (
 	"math/big"
 	"net/mail"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // NormalizeEmail 校验裸邮箱地址，并做统一的查询规范化。
@@ -18,6 +20,19 @@ func NormalizeEmail(value string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 	return value, nil
+}
+
+// validDisplayName 允许空展示名称，限制字符数并拒绝控制字符。
+func validDisplayName(value string) bool {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 // validCode 允许有长度上限的错误证明，使失败猜测消耗一次尝试。

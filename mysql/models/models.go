@@ -3,10 +3,10 @@ package models
 
 import "time"
 
-// Account 是登录主体。凭证存放在绑定表中，不在这一行上。
+// Account 是登录主体。Username 只作展示，凭证存放在绑定表中。
 type Account struct {
 	ID       string  `gorm:"column:id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
-	Username *string `gorm:"column:username;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;uniqueIndex:username"`
+	Username *string `gorm:"column:username;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"`
 }
 
 // TableName 返回账号表名。

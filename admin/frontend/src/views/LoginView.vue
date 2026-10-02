@@ -111,7 +111,7 @@ async function handleLogin(): Promise<void> {
 
       <form ref="form" @submit.prevent="handleLogin">
         <template v-if="method === 'password'">
-          <label for="login-identifier">用户名或邮箱</label>
+          <label for="login-identifier">登录标识或邮箱</label>
           <input
             id="login-identifier"
             v-model="identifier"
@@ -119,7 +119,7 @@ async function handleLogin(): Promise<void> {
             name="username"
             type="text"
             autocomplete="username"
-            placeholder="请输入管理员用户名或邮箱"
+            placeholder="请输入管理员登录标识或邮箱"
             required
           >
           <label for="login-password">密码</label>

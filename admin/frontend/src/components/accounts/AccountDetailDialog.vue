@@ -79,7 +79,7 @@ watch(() => props.open, syncOpen, { flush: 'post' })
         <template v-else-if="account">
           <div class="detail-meta">
             <div class="detail-meta-row"><span>账号 ID</span><strong>{{ account.id }}</strong></div>
-            <div class="detail-meta-row"><span>用户名</span><strong>{{ account.username || '未设置' }}</strong></div>
+            <div class="detail-meta-row"><span>展示名称</span><strong>{{ account.username || '未设置' }}</strong></div>
             <div class="detail-meta-row"><span>邮箱</span><strong>{{ account.email || '未绑定' }}</strong></div>
           </div>
 

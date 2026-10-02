@@ -21,40 +21,28 @@ func (r *accountRepository) GetByID(ctx context.Context, id string) (*authkit.Ac
 	return r.findAccount(ctx, id, false)
 }
 
-// GetByUsername 按区分大小写的用户名返回账号。
-func (r *accountRepository) GetByUsername(ctx context.Context, username string) (*authkit.Account, error) {
-	var m models.Account
-	if err := r.db.WithContext(ctx).Where("username = ?", username).Take(&m).Error; err != nil {
-		return nil, mapError(err)
+// GetByPasswordIdentifier 按区分大小写的密码登录标识返回账号。
+func (r *accountRepository) GetByPasswordIdentifier(ctx context.Context, identifier string) (*authkit.Account, error) {
+	binding, err := r.findBinding(ctx, authkit.MethodPassword, identifier, false)
+	if err != nil {
+		return nil, err
 	}
-	return r.withEmail(ctx, &m)
+	if binding.AccountID == nil {
+		return nil, authkit.ErrNotFound
+	}
+	return r.findAccount(ctx, *binding.AccountID, false)
 }
 
-// SetUsername 只为已锁定的账号首次赋值，或保留完全相同的用户名。
-func (r *accountRepository) SetUsername(ctx context.Context, accountID, username string) error {
-	if username == "" {
-		return authkit.ErrInvalidInput
+// GetPasswordIdentifier 返回账号绑定的密码登录标识。
+func (r *accountRepository) GetPasswordIdentifier(ctx context.Context, accountID string) (string, error) {
+	var binding models.Binding
+	if err := r.db.WithContext(ctx).
+		Select("identifier").
+		Where("account_id = ? AND method = ?", accountID, authkit.MethodPassword).
+		Take(&binding).Error; err != nil {
+		return "", mapError(err)
 	}
-	var account models.Account
-	err := r.db.WithContext(ctx).
-		Select("id", "username").
-		Where("id = ?", accountID).
-		Take(&account).Error
-	if err != nil {
-		return mapError(err)
-	}
-	if account.Username != nil && *account.Username != "" {
-		if *account.Username != username {
-			return authkit.ErrConflict
-		}
-		return nil
-	}
-	return mapError(
-		r.db.WithContext(ctx).
-			Model(&models.Account{}).
-			Where("id = ? AND (username IS NULL OR username = '')", accountID).
-			Update("username", username).Error,
-	)
+	return binding.Identifier, nil
 }
 
 // GetPasswordHash 读取已锁定账号的密码摘要；没有可用密码时返回 ErrNotFound。
@@ -72,22 +60,19 @@ func (r *accountRepository) GetPasswordHash(ctx context.Context, accountID strin
 	return *binding.PasswordHash, nil
 }
 
-// SetPasswordHash 为已锁定的账号开通或重置密码，用户名必须与账号保持一致。
-func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, username, hash string) error {
-	if username == "" || hash == "" {
+// SetPasswordHash 为已锁定的账号开通或重置密码，已有登录标识不可更改。
+func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+	if identifier == "" || hash == "" {
 		return authkit.ErrInvalidInput
 	}
 	// 密码摘要不能进入宿主配置的 GORM SQL 日志；该 Session 仍使用同一个事务。
 	db := r.db.WithContext(ctx).Session(&gorm.Session{Logger: logger.Discard})
 	var account models.Account
-	err := db.Select("id", "username").
+	err := db.Select("id").
 		Where("id = ?", accountID).
 		Take(&account).Error
 	if err != nil {
 		return mapError(err)
-	}
-	if account.Username == nil || *account.Username != username {
-		return authkit.ErrConflict
 	}
 	var binding models.Binding
 	err = db.Select("identifier").
@@ -96,17 +81,17 @@ func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, user
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// 唯一冲突只返回错误，不能通过 upsert 修改另一账号的密码。
 		return mapError(db.Create(&models.Binding{
-			Method: authkit.MethodPassword, Identifier: username, AccountID: &accountID, PasswordHash: &hash,
+			Method: authkit.MethodPassword, Identifier: identifier, AccountID: &accountID, PasswordHash: &hash,
 		}).Error)
 	}
 	if err != nil {
 		return mapError(err)
 	}
-	if binding.Identifier != username {
+	if binding.Identifier != identifier {
 		return authkit.ErrConflict
 	}
 	return mapError(db.Model(&models.Binding{}).
-		Where("account_id = ? AND method = ? AND identifier = ?", accountID, authkit.MethodPassword, username).
+		Where("account_id = ? AND method = ? AND identifier = ?", accountID, authkit.MethodPassword, identifier).
 		Update("password_hash", hash).Error)
 }
 
@@ -341,7 +326,7 @@ func (r *sessionRepository) DeleteByAccount(ctx context.Context, accountID strin
 		Delete(&models.Session{}).Error)
 }
 
-// accountModel 把公开账号映射为数据行。空用户名存为 NULL。
+// accountModel 把公开账号映射为数据行。空展示名存为 NULL。
 func accountModel(account *authkit.Account) *models.Account {
 	m := &models.Account{ID: account.ID}
 	if account.Username != "" {

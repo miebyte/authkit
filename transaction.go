@@ -11,9 +11,10 @@ import (
 // Transaction 在调用方拥有的事务内执行身份操作。
 // 结果，尤其是明文令牌，在调用方提交之前都只是暂定的。
 type Transaction struct {
-	repos        Repositories
-	registration RegistrationPolicy
-	now          func() time.Time
+	repos             Repositories
+	registration      RegistrationPolicy
+	now               func() time.Time
+	passwordAlgorithm PasswordAlgorithm
 }
 
 // codeLogin 表示一次验证码登录，与投递渠道无关。
@@ -60,6 +61,16 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	}
 	user, err := t.findCodeAccount(ctx, input)
 	created := errors.Is(err, ErrNotFound)
+	if err != nil && !created {
+		return Outcome{}, err
+	}
+	passwordAccount, passwordErr := t.repos.Accounts().GetByPasswordIdentifier(ctx, input.target)
+	if passwordErr != nil && !errors.Is(passwordErr, ErrNotFound) {
+		return Outcome{}, passwordErr
+	}
+	if passwordAccount != nil && (created || passwordAccount.ID != user.ID) {
+		return Outcome{}, ErrConflict
+	}
 	// 如果账号不存在，则创建账号
 	if created {
 		var account *Account
@@ -184,57 +195,67 @@ func (t *Transaction) createAccount(
 
 // CreatePasswordAccount 在宿主事务内创建密码账号，返回值须在提交后使用。
 func (t *Transaction) CreatePasswordAccount(ctx context.Context, input CreatePasswordAccountInput) (*Account, error) {
-	username, err := NormalizeUsername(input.Username)
-	if err != nil || !validPassword(input.Password, 8) {
+	identifier, err := NormalizeUsername(input.Identifier)
+	if err != nil || !t.passwordAlgorithm.validPassword(input.Password, 8) || !validDisplayName(input.Username) {
 		return nil, ErrInvalidInput
 	}
 
-	hash, err := hashPassword(input.Password)
+	hash, err := t.passwordAlgorithm.hashPassword(input.Password)
 	if err != nil {
 		return nil, err
 	}
 
-	credential := Credential{Method: MethodPassword, Identifier: username}
+	if err := t.checkPasswordEmailOwner(ctx, identifier, ""); err != nil {
+		return nil, err
+	}
+	credential := Credential{Method: MethodPassword, Identifier: identifier}
 	if err := t.repos.Blacklist().Check(ctx, credential); err != nil {
 		return nil, err
 	}
 
-	account, err := t.createAccount(ctx, &Account{Username: username}, credential)
+	account, err := t.createAccount(ctx, &Account{Username: input.Username}, credential)
 	if err != nil {
 		return nil, err
 	}
 
-	err = t.repos.Accounts().SetPasswordHash(ctx, account.ID, username, hash)
+	err = t.repos.Accounts().SetPasswordHash(ctx, account.ID, identifier, hash)
 	if err != nil {
 		return nil, err
 	}
 	return account, nil
 }
 
-// SetPassword 在宿主事务内维护密码；调用方负责账号操作权限，用户名一旦确定不可更改。
+// SetPassword 在宿主事务内维护密码绑定，不修改展示名称；调用方负责账号操作权限。
 func (t *Transaction) SetPassword(ctx context.Context, input SetPasswordInput) error {
-	if !validToken(input.AccountID) || !validPassword(input.Password, 8) {
+	if !validToken(input.AccountID) || !t.passwordAlgorithm.validPassword(input.Password, 8) {
 		return ErrInvalidInput
 	}
 	accountID := strings.ToLower(input.AccountID)
-	account, err := t.repos.Accounts().GetByID(ctx, accountID)
+	_, err := t.repos.Accounts().GetByID(ctx, accountID)
 	if err != nil {
 		return err
 	}
-	username := input.Username
-	if username == "" {
-		username = account.Username
+	identifier := input.Identifier
+	if identifier == "" {
+		identifier, err = t.repos.Accounts().GetPasswordIdentifier(ctx, accountID)
+		if errors.Is(err, ErrNotFound) {
+			return ErrInvalidInput
+		}
+		if err != nil {
+			return err
+		}
 	}
-	username, err = NormalizeUsername(username)
+	identifier, err = NormalizeUsername(identifier)
 	if err != nil {
 		return err
-	}
-	if account.Username != "" && account.Username != username {
-		return ErrConflict
 	}
 
-	hash, err := hashPassword(input.Password)
+	hash, err := t.passwordAlgorithm.hashPassword(input.Password)
 	if err != nil {
+		return err
+	}
+
+	if err := t.checkPasswordEmailOwner(ctx, identifier, accountID); err != nil {
 		return err
 	}
 
@@ -243,7 +264,7 @@ func (t *Transaction) SetPassword(ctx context.Context, input SetPasswordInput) e
 		ctx,
 		Credential{
 			Method:     MethodPassword,
-			Identifier: username,
+			Identifier: identifier,
 		})
 	if err != nil {
 		return err
@@ -254,18 +275,48 @@ func (t *Transaction) SetPassword(ctx context.Context, input SetPasswordInput) e
 		return err
 	}
 
-	// 初次设密可能与另一请求并发，账号锁内再次检查用户名所有权。
-	err = t.repos.Accounts().SetUsername(ctx, accountID, username)
-	if err != nil {
-		return err
+	if input.Identifier == "" {
+		// 自动读取的绑定可能已被并发解绑，重置不能重新开通密码。
+		current, err := t.repos.Accounts().GetPasswordIdentifier(ctx, accountID)
+		if errors.Is(err, ErrNotFound) {
+			return ErrInvalidInput
+		}
+		if err != nil {
+			return err
+		}
+		if current != identifier {
+			return ErrConflict
+		}
 	}
 
-	err = t.repos.Accounts().SetPasswordHash(ctx, accountID, username, hash)
+	// 账号锁内再次检查密码绑定，防止并发首次设密覆盖另一登录标识。
+	err = t.repos.Accounts().SetPasswordHash(ctx, accountID, identifier, hash)
 	if err != nil {
 		return err
 	}
 
 	return t.repos.Sessions().DeleteByAccount(ctx, accountID)
+}
+
+// checkPasswordEmailOwner 与邮箱注册共用凭证锁，拒绝把同邮箱的两种登录方式分配给不同账号。
+func (t *Transaction) checkPasswordEmailOwner(ctx context.Context, identifier, accountID string) error {
+	if !strings.Contains(identifier, "@") {
+		return nil
+	}
+	if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: identifier}); err != nil {
+		return err
+	}
+	account, err := t.repos.Accounts().GetByEmail(ctx, identifier)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if account.ID != accountID {
+		return ErrConflict
+	}
+	return nil
 }
 
 // LoginPassword 在宿主事务内验证密码；Rejected 必须提交以保留尝试次数。
@@ -278,27 +329,16 @@ func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInpu
 	if !validPassword(input.Password, 1) || len(input.IP) > 512 {
 		return Outcome{}, ErrInvalidInput
 	}
-	credential := Credential{Method: MethodPassword}
-	var err error
-	if strings.Contains(input.Identifier, "@") {
-		credential.Method = MethodEmail
-		credential.Identifier, err = NormalizeEmail(input.Identifier)
-	} else {
-		credential.Identifier, err = NormalizeUsername(input.Identifier)
-	}
+	identifier, err := NormalizeUsername(input.Identifier)
 	if err != nil {
 		return Outcome{}, err
 	}
-	var account *Account
-	if credential.Method == MethodEmail {
-		account, err = t.repos.Accounts().GetByEmail(ctx, credential.Identifier)
-	} else {
-		account, err = t.repos.Accounts().GetByUsername(ctx, credential.Identifier)
-	}
+	credential := Credential{Method: MethodPassword, Identifier: identifier}
+	account, err := t.repos.Accounts().GetByPasswordIdentifier(ctx, identifier)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Outcome{}, err
 	}
-	// 两种别名按账号 ID 共用额度，未知标识也保留自己的尝试次数。
+	// 已有密码绑定按账号 ID 限流，未知标识也保留自己的尝试次数。
 	rateKey := "password-identifier:" + credential.Method + ":" + credential.Identifier
 	if account != nil {
 		rateKey = "password-account:" + account.ID
@@ -313,36 +353,37 @@ func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInpu
 	if err := t.repos.Blacklist().Check(ctx, credential); err != nil {
 		return passwordRejection(err)
 	}
-	if credential.Method == MethodEmail && account != nil && account.Username != "" {
-		if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodPassword, Identifier: account.Username}); err != nil {
-			return passwordRejection(err)
-		}
-	}
 	if account == nil {
-		return rejectPasswordCredentials(input.Password)
+		return rejectPasswordCredentials(input.Password, t.passwordAlgorithm)
 	}
 	if err := t.repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
 		return passwordRejection(err)
 	}
 	account, err = t.repos.Accounts().GetByID(ctx, account.ID)
 	if errors.Is(err, ErrNotFound) {
-		return rejectPasswordCredentials(input.Password)
+		return rejectPasswordCredentials(input.Password, t.passwordAlgorithm)
 	}
 	if err != nil {
 		return Outcome{}, err
 	}
-	if credential.Method == MethodEmail && account.Email != credential.Identifier ||
-		credential.Method == MethodPassword && account.Username != credential.Identifier {
-		return rejectPasswordCredentials(input.Password)
+	identifier, err = t.repos.Accounts().GetPasswordIdentifier(ctx, account.ID)
+	if errors.Is(err, ErrNotFound) {
+		return rejectPasswordCredentials(input.Password, t.passwordAlgorithm)
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	if identifier != credential.Identifier {
+		return rejectPasswordCredentials(input.Password, t.passwordAlgorithm)
 	}
 	hash, err := t.repos.Accounts().GetPasswordHash(ctx, account.ID)
 	if errors.Is(err, ErrNotFound) {
-		return rejectPasswordCredentials(input.Password)
+		return rejectPasswordCredentials(input.Password, t.passwordAlgorithm)
 	}
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !verifyPassword(input.Password, hash) || requiredAccountID != "" && account.ID != requiredAccountID {
+	if !t.passwordAlgorithm.verifyPassword(input.Password, hash) || requiredAccountID != "" && account.ID != requiredAccountID {
 		return Outcome{Rejected: ErrInvalidCredentials}, nil
 	}
 	return t.finishLogin(ctx, account, nil, false, now)

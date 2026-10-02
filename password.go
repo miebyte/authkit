@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -18,11 +19,16 @@ const (
 	passwordPrefix = "$argon2id$v=19$m=19456,t=2,p=1$"
 	// dummyPasswordHash 让不存在或未设密的账号执行同等参数的摘要验证。
 	dummyPasswordHash = passwordPrefix + "AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	// 固定 cost 10 占位摘要，不在请求处理中生成 bcrypt。
+	dummyBcryptPasswordHash = "$2a$10$hNpyXoDIOhsRTbhxav6H8e1LEnjTLgOqtnF8BF0m57eoqqm0g7uJe"
 )
 
-// NormalizeUsername 校验用户名并去除首尾空白，保留大小写。
+// NormalizeUsername 校验密码登录标识；邮箱统一转为小写，普通用户名保留大小写，不用于账号展示名称。
 func NormalizeUsername(value string) (string, error) {
 	value = strings.TrimSpace(value)
+	if strings.Contains(value, "@") {
+		return NormalizeEmail(value)
+	}
 	if !utf8.ValidString(value) || utf8.RuneCountInString(value) < 3 || utf8.RuneCountInString(value) > 64 {
 		return "", ErrInvalidInput
 	}
@@ -53,7 +59,24 @@ func hashPassword(password string) (string, error) {
 	return passwordPrefix + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash), nil
 }
 
-// verifyPassword 只接受本版本生成的参数，避免损坏的摘要触发无界内存分配。
+// IsLegacyPasswordHash 判断可安全导入的历史 bcrypt 摘要，不需要密码明文。
+func IsLegacyPasswordHash(encoded string) bool {
+	if len(encoded) != 60 || encoded[4] < '0' || encoded[4] > '9' || encoded[5] < '0' || encoded[5] > '9' || encoded[6] != '$' || !(strings.HasPrefix(encoded, "$2a$") || strings.HasPrefix(encoded, "$2b$") || strings.HasPrefix(encoded, "$2y$")) {
+		return false
+	}
+	cost, err := bcrypt.Cost([]byte(encoded))
+	if err != nil || cost < bcrypt.MinCost || cost > 14 {
+		return false
+	}
+	for _, character := range encoded[7:] {
+		if !(character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '.' || character == '/') {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyPassword 只验证默认 Argon2id 的固定参数。
 func verifyPassword(password, encoded string) bool {
 	if len(encoded) != len(dummyPasswordHash) {
 		verifyPassword(password, dummyPasswordHash)
@@ -83,7 +106,41 @@ func passwordRejection(err error) (Outcome, error) {
 }
 
 // rejectPasswordCredentials 为缺少有效密码凭据的请求执行占位验证。
-func rejectPasswordCredentials(password string) (Outcome, error) {
-	verifyPassword(password, dummyPasswordHash)
+func rejectPasswordCredentials(password string, algorithm PasswordAlgorithm) (Outcome, error) {
+	algorithm.verifyPassword(password, algorithm.dummyPasswordHash())
 	return Outcome{Rejected: ErrInvalidCredentials}, nil
+}
+
+// validPassword 按所选算法额外限制 bcrypt 的字节长度。
+func (algorithm PasswordAlgorithm) validPassword(password string, minimum int) bool {
+	return validPassword(password, minimum) && (algorithm != PasswordAlgorithmBcrypt || len(password) <= 72)
+}
+
+func (algorithm PasswordAlgorithm) hashPassword(password string) (string, error) {
+	if algorithm == PasswordAlgorithmBcrypt {
+		if len(password) > 72 {
+			return "", ErrInvalidInput
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		return string(hash), err
+	}
+	return hashPassword(password)
+}
+
+func (algorithm PasswordAlgorithm) verifyPassword(password, encoded string) bool {
+	if algorithm == PasswordAlgorithmBcrypt {
+		if !IsLegacyPasswordHash(encoded) || len(password) > 72 {
+			bcrypt.CompareHashAndPassword([]byte(dummyBcryptPasswordHash), []byte(password))
+			return false
+		}
+		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+	}
+	return verifyPassword(password, encoded)
+}
+
+func (algorithm PasswordAlgorithm) dummyPasswordHash() string {
+	if algorithm == PasswordAlgorithmBcrypt {
+		return dummyBcryptPasswordHash
+	}
+	return dummyPasswordHash
 }

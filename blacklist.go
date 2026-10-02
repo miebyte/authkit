@@ -23,7 +23,7 @@ type BlacklistPage struct {
 	Limit int              `json:"limit"`
 }
 
-// AddBlacklist 拉黑邮箱、密码用户名或原始微信 OpenID，并撤销关联账号的会话；调用方必须完成管理鉴权。
+// AddBlacklist 拉黑邮箱、密码登录标识或原始微信 OpenID，并撤销关联账号的会话；调用方必须完成管理鉴权。
 func (s *Service) AddBlacklist(ctx context.Context, credential Credential) error {
 	return s.addBlacklist(ctx, credential, "")
 }
@@ -60,7 +60,7 @@ func (s *Service) addBlacklist(ctx context.Context, input Credential, protectedA
 			case MethodWechat:
 				account, err = repos.Accounts().GetByWechat(ctx, credential.Identifier)
 			case MethodPassword:
-				account, err = repos.Accounts().GetByUsername(ctx, credential.Identifier)
+				account, err = repos.Accounts().GetByPasswordIdentifier(ctx, credential.Identifier)
 			}
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
@@ -91,15 +91,15 @@ func (s *Service) ListBlacklist(ctx context.Context, page, limit int) (Blacklist
 	return s.store.Blacklist().List(ctx, page, limit)
 }
 
-// blacklistCredential 将管理输入转换为仓储使用的邮箱、用户名或 OpenID 摘要。
+// blacklistCredential 将管理输入转换为仓储使用的邮箱、密码登录标识或 OpenID 摘要。
 func blacklistCredential(input Credential) (Credential, error) {
 	switch input.Method {
 	case MethodEmail:
 		email, err := NormalizeEmail(input.Identifier)
 		return Credential{Method: MethodEmail, Identifier: email}, err
 	case MethodPassword:
-		username, err := NormalizeUsername(input.Identifier)
-		return Credential{Method: MethodPassword, Identifier: username}, err
+		identifier, err := NormalizeUsername(input.Identifier)
+		return Credential{Method: MethodPassword, Identifier: identifier}, err
 	case MethodWechat:
 		if strings.TrimSpace(input.Identifier) == "" || len(input.Identifier) > 128 {
 			return Credential{}, ErrInvalidInput

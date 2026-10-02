@@ -9,17 +9,18 @@ import (
 // 加锁方法必须在事务中调用。
 type AccountRepository interface {
 	GetByID(ctx context.Context, id string) (*Account, error)
-	GetByUsername(ctx context.Context, username string) (*Account, error)
-	// SetUsername 在已锁定的账号上首次赋值，已有值只允许保持不变。
-	SetUsername(ctx context.Context, accountID, username string) error
+	// GetByPasswordIdentifier 按密码绑定的登录标识返回账号。
+	GetByPasswordIdentifier(ctx context.Context, identifier string) (*Account, error)
 	GetByEmail(ctx context.Context, email string) (*Account, error)
 	// GetByWechat 即使 OpenID 尚无所有者，也会对其加排他锁。
 	GetByWechat(ctx context.Context, openIDHash string) (*Account, error)
 	GetBySessionToken(ctx context.Context, hash string, now time.Time) (*Account, error)
-	// GetPasswordHash 获取密码摘要
+	// GetPasswordIdentifier 读取账号的密码登录标识；没有绑定时返回 ErrNotFound。
+	GetPasswordIdentifier(ctx context.Context, accountID string) (string, error)
+	// GetPasswordHash 获取密码摘要。
 	GetPasswordHash(ctx context.Context, accountID string) (string, error)
-	// SetPasswordHash 设置密码摘要
-	SetPasswordHash(ctx context.Context, accountID, username, hash string) error
+	// SetPasswordHash 开通或重置密码，已有绑定的登录标识必须保持不变。
+	SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error
 	// Create 创建账号和凭证绑定，并授权准入。
 	Create(context.Context, *Account, Credential) error
 }
@@ -45,11 +46,11 @@ type SessionRepository interface {
 	DeleteByAccount(context.Context, string) error
 }
 
-// BlacklistRepository 持久化邮箱、密码用户名和 OpenID 摘要的黑名单。
+// BlacklistRepository 持久化邮箱、密码登录标识和 OpenID 摘要的黑名单。
 type BlacklistRepository interface {
 	// Check 在事务内锁定凭证，即使尚无黑名单记录；被拉黑时返回 ErrBlacklisted。
 	Check(context.Context, Credential) error
-	// CheckAccount 锁定账号并检查全部绑定及保留的用户名；被拉黑时返回 ErrBlacklisted。
+	// CheckAccount 锁定账号并检查全部绑定；被拉黑时返回 ErrBlacklisted。
 	CheckAccount(context.Context, string) error
 	// Add 在同一事务中加入黑名单、清除邮箱验证码并撤销关联账号的全部会话。
 	Add(context.Context, BlacklistEntry) error
