@@ -953,6 +953,14 @@ type handlerSessions struct {
 	store *handlerAuthStore
 }
 
+func (r handlerSessions) Get(_ context.Context, hash string) (*authkit.Session, error) {
+	session, ok := r.store.sessions[hash]
+	if !ok {
+		return nil, authkit.ErrNotFound
+	}
+	return &session, nil
+}
+
 func (r handlerSessions) Create(_ context.Context, session *authkit.Session) error {
 	r.store.sessions[session.Hash] = *session
 	return nil
@@ -1025,4 +1033,14 @@ func (s *handlerAuthStore) AdminRevokeSession(_ context.Context, id, sessionID s
 func (s *handlerAuthStore) AdminRevokeAllSessions(_ context.Context, id string) error {
 	s.revokedAll = id
 	return nil
+}
+
+func TestAdminRejectsDerivedSessions(t *testing.T) {
+	f := newHandlerFixture(t)
+	parent := f.login(t, "user@example.com")
+	derived, err := f.service.LoginAs(context.Background(), parent, testAdminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", derived.Token), http.StatusForbidden)
 }

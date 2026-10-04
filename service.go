@@ -177,7 +177,30 @@ func (s *Service) LoginWechat(
 
 // Authenticate 解析仍然有效的应用令牌。它不授权宿主资源。
 func (s *Service) Authenticate(ctx context.Context, token string) (*Account, error) {
-	return authenticate(ctx, s.store, token, s.now().UTC())
+	session, err := s.AuthenticateSession(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return &session.Account, nil
+}
+
+// AuthenticateSession 验证会话及其父会话，返回宿主授权所需的真实发起账号。
+func (s *Service) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
+	return authenticateSession(ctx, s.store, token, s.now().UTC())
+}
+
+// LoginAs 为可信宿主签发绑定父会话的代登录凭证；宿主负责管理员授权。
+func (s *Service) LoginAs(ctx context.Context, parentToken, accountID string) (*LoginResult, error) {
+	var login *LoginResult
+	err := s.store.WithTransaction(ctx, func(repos Repositories) error {
+		var err error
+		login, err = s.InTransaction(repos, s.registration).LoginAs(ctx, parentToken, accountID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return login, nil
 }
 
 // CreatePasswordAccount 由可信宿主创建已准入的密码账号，不创建会话。

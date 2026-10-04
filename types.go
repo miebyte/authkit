@@ -42,9 +42,18 @@ type Challenge struct {
 
 // Session 只保存应用凭证的摘要。
 type Session struct {
-	Hash      string
-	AccountID string
-	Expires   time.Time
+	Hash       string
+	AccountID  string
+	Expires    time.Time
+	ParentHash string
+}
+
+// AuthenticatedSession 返回当前账号及代登录的真实发起账号；普通会话的 Actor 为空。
+// 宿主必须在签发代登录前及每次使用时检查 Actor 的角色与业务状态。
+type AuthenticatedSession struct {
+	Account Account
+	Actor   *Account
+	Expires time.Time
 }
 
 // WechatIdentity 是经服务端核验的 OpenID。AppID 标明执行换取的应用且不落库；OpenID 是唯一凭证。

@@ -13,7 +13,7 @@ import (
 
 var _ authkit.AdminRepository = (*Store)(nil)
 
-// AdminOverview 统计账号、已归属的绑定和未过期会话。
+// AdminOverview 统计账号、已归属的绑定和父子关系仍有效的未过期会话。
 func (s *Store) AdminOverview(ctx context.Context, now time.Time) (authkit.AdminOverview, error) {
 	var result authkit.AdminOverview
 	if err := s.db.WithContext(ctx).Model(&models.Account{}).Count(&result.Accounts).Error; err != nil {
@@ -30,7 +30,10 @@ func (s *Store) AdminOverview(ctx context.Context, now time.Time) (authkit.Admin
 		return authkit.AdminOverview{}, mapError(err)
 	}
 	if err := s.db.WithContext(ctx).Model(&models.Session{}).
-		Where("expires > ?", now.UTC()).Count(&result.ActiveSessions).Error; err != nil {
+		Where("expires > ?", now.UTC()).
+		Where(`parent_hash = '' OR EXISTS (SELECT 1 FROM auth_sessions AS parent
+			WHERE parent.hash = auth_sessions.parent_hash AND parent.expires > ? AND parent.parent_hash = '')`, now.UTC()).
+		Count(&result.ActiveSessions).Error; err != nil {
 		return authkit.AdminOverview{}, mapError(err)
 	}
 	return result, nil
@@ -64,8 +67,10 @@ func (s *Store) AdminListAccounts(
 		EXISTS (SELECT 1 FROM auth_bindings AS b
 			WHERE b.account_id = auth_accounts.id AND b.method = ? AND b.password_hash IS NOT NULL) AS password,
 		(SELECT COUNT(*) FROM auth_sessions AS sess
-			WHERE sess.account_id = auth_accounts.id AND sess.expires > ?) AS active_sessions`,
-		authkit.MethodEmail, authkit.MethodWechat, authkit.MethodPassword, now.UTC()).
+			WHERE sess.account_id = auth_accounts.id AND sess.expires > ?
+			AND (sess.parent_hash = '' OR EXISTS (SELECT 1 FROM auth_sessions AS parent
+				WHERE parent.hash = sess.parent_hash AND parent.expires > ? AND parent.parent_hash = ''))) AS active_sessions`,
+		authkit.MethodEmail, authkit.MethodWechat, authkit.MethodPassword, now.UTC(), now.UTC()).
 		Order("auth_accounts.id").Limit(limit).Offset((page - 1) * limit).
 		Scan(&result.Items).Error; err != nil {
 		return authkit.AdminAccountPage{}, mapError(err)
@@ -104,6 +109,8 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 	}
 	var sessions []models.Session
 	if err := s.db.WithContext(ctx).Where("account_id = ? AND expires > ?", id, now.UTC()).
+		Where(`parent_hash = '' OR EXISTS (SELECT 1 FROM auth_sessions AS parent
+			WHERE parent.hash = auth_sessions.parent_hash AND parent.expires > ? AND parent.parent_hash = '')`, now.UTC()).
 		Order("expires DESC").Find(&sessions).Error; err != nil {
 		return authkit.AdminAccountDetail{}, mapError(err)
 	}

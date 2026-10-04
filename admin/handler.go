@@ -236,16 +236,16 @@ func (h *handler) withAdmin(next func(http.ResponseWriter, *http.Request, *authk
 			writeError(w, authkit.ErrUnauthorized)
 			return
 		}
-		account, err := h.service.Authenticate(r.Context(), token)
+		session, err := h.service.AuthenticateSession(r.Context(), token)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		if account.ID != h.adminID {
+		if session.Account.ID != h.adminID || session.Actor != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		next(w, r, account, token)
+		next(w, r, &session.Account, token)
 	}
 }
 

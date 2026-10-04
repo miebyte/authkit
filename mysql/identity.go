@@ -309,6 +309,15 @@ func (r *rateRepository) Hit(ctx context.Context, id string, now time.Time, limi
 // sessionRepository 持久化并撤销应用会话摘要。
 type sessionRepository struct{ db *gorm.DB }
 
+// Get 按摘要读取会话；不存在时返回 ErrNotFound。
+func (r *sessionRepository) Get(ctx context.Context, hash string) (*authkit.Session, error) {
+	var session models.Session
+	if err := r.db.WithContext(ctx).Where("hash = ?", hash).Take(&session).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return mapper.SessionModelToDomain(&session), nil
+}
+
 // Create 插入会话，不持久化明文凭证。
 func (r *sessionRepository) Create(ctx context.Context, s *authkit.Session) error {
 	return mapError(r.db.WithContext(ctx).Create(mapper.SessionDomainToModel(s)).Error)

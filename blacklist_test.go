@@ -585,6 +585,14 @@ func (r blacklistRates) Hit(_ context.Context, id string, now time.Time, limit i
 
 type blacklistSessions struct{ store *blacklistMemoryStore }
 
+func (r blacklistSessions) Get(_ context.Context, hash string) (*Session, error) {
+	session, ok := r.store.sessions[hash]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &session, nil
+}
+
 func (r blacklistSessions) Create(_ context.Context, session *Session) error {
 	r.store.sessions[session.Hash] = *session
 	return nil

@@ -406,52 +406,104 @@ func (t *Transaction) finishLogin(
 			return Outcome{}, err
 		}
 	}
-	token, err := newID()
-	if err != nil {
-		return Outcome{}, err
-	}
-	expires := now.Add(SessionTTL)
-	err = t.repos.Sessions().Create(
-		ctx,
-		&Session{
-			Hash:      digest(token),
-			AccountID: account.ID,
-			Expires:   expires,
-		},
-	)
-	if err != nil {
-		return Outcome{}, err
-	}
-
-	return Outcome{
-		Login: &LoginResult{
-			Account: *account,
-			Token:   token,
-			Expires: expires,
-			Created: created,
-		},
-	}, nil
+	login, err := t.createSession(ctx, account, "", now.Add(SessionTTL), created)
+	return Outcome{Login: login}, err
 }
 
-// authenticate 对格式错误的凭证跳过数据库查询，并把缺失会话映射为未授权。
-func authenticate(
-	ctx context.Context,
-	repos Repositories,
-	token string,
-	now time.Time,
-) (*Account, error) {
+// createSession 为普通登录和代登录统一生成令牌并持久化摘要。
+func (t *Transaction) createSession(ctx context.Context, account *Account, parentHash string, expires time.Time, created bool) (*LoginResult, error) {
+	token, err := newID()
+	if err != nil {
+		return nil, err
+	}
+	if err := t.repos.Sessions().Create(ctx, &Session{
+		Hash: digest(token), AccountID: account.ID, Expires: expires, ParentHash: parentHash,
+	}); err != nil {
+		return nil, err
+	}
+	return &LoginResult{Account: *account, Token: token, Expires: expires, Created: created}, nil
+}
+
+// AuthenticateSession 在宿主事务内验证会话及其父会话，供宿主执行业务授权。
+func (t *Transaction) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
+	return authenticateSession(ctx, t.repos, token, t.now().UTC())
+}
+
+// LoginAs 在宿主事务内签发代登录会话；调用前须由宿主完成管理员授权。
+// 派生会话不能再次派生，且期限不能超过父会话；调用后授权失败须回滚事务。
+func (t *Transaction) LoginAs(ctx context.Context, parentToken, accountID string) (*LoginResult, error) {
+	if !validToken(accountID) {
+		return nil, ErrInvalidInput
+	}
+	now := t.now().UTC()
+	parent, err := authenticateSession(ctx, t.repos, parentToken, now)
+	if err != nil {
+		return nil, err
+	}
+	if parent.Actor != nil {
+		return nil, ErrUnauthorized
+	}
+	account, err := t.repos.Accounts().GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
+		return nil, err
+	}
+	expires := now.Add(SessionTTL)
+	if parent.Expires.Before(expires) {
+		expires = parent.Expires
+	}
+	return t.createSession(ctx, account, digest(parentToken), expires, false)
+}
+
+// authenticateSession 对格式错误的凭证跳过数据库查询，并限制父子关系只有一层。
+func authenticateSession(ctx context.Context, repos Repositories, token string, now time.Time) (*AuthenticatedSession, error) {
 	if !validToken(token) {
 		return nil, ErrUnauthorized
 	}
-	user, err := repos.Accounts().GetBySessionToken(ctx, digest(token), now)
-	if errors.Is(err, ErrNotFound) {
-		return nil, ErrUnauthorized
-	}
+	session, account, err := activeSession(ctx, repos, digest(token), now)
 	if err != nil {
 		return nil, err
 	}
-	if err := repos.Blacklist().CheckAccount(ctx, user.ID); err != nil {
-		return nil, err
+	result := &AuthenticatedSession{Account: *account, Expires: session.Expires}
+	if session.ParentHash != "" {
+		parent, actor, err := activeSession(ctx, repos, session.ParentHash, now)
+		if err != nil {
+			return nil, err
+		}
+		if parent.ParentHash != "" {
+			return nil, ErrUnauthorized
+		}
+		result.Actor = actor
+		if parent.Expires.Before(result.Expires) {
+			result.Expires = parent.Expires
+		}
 	}
-	return user, nil
+	return result, nil
+}
+
+// activeSession 校验摘要对应会话、账号和账号黑名单。
+func activeSession(ctx context.Context, repos Repositories, hash string, now time.Time) (*Session, *Account, error) {
+	session, err := repos.Sessions().Get(ctx, hash)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil, ErrUnauthorized
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if session == nil || !session.Expires.After(now) {
+		return nil, nil, ErrUnauthorized
+	}
+	account, err := repos.Accounts().GetBySessionToken(ctx, hash, now)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil, ErrUnauthorized
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
+		return nil, nil, err
+	}
+	return session, account, nil
 }

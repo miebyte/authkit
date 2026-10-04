@@ -41,6 +41,8 @@ type RateRepository interface {
 
 // SessionRepository 存储并撤销令牌摘要。
 type SessionRepository interface {
+	// Get 返回会话摘要及父会话关系，不存在时返回 ErrNotFound。
+	Get(ctx context.Context, hash string) (*Session, error)
 	Create(context.Context, *Session) error
 	Delete(context.Context, string) error
 	DeleteByAccount(context.Context, string) error
