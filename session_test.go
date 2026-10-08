@@ -8,6 +8,106 @@ import (
 	"time"
 )
 
+func TestAuthenticateSessionReturnsLoginMethod(t *testing.T) {
+	f := newBlacklistFixture(t)
+	ctx := context.Background()
+	accountID := strings.Repeat("a", 64)
+	f.store.bind(accountID, "user@example.com", f.wechat.identity.OpenID)
+	if err := f.service.SetPassword(ctx, SetPasswordInput{
+		AccountID: accountID, Identifier: "user@example.com", Password: "valid-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	logins := make(map[string]*LoginResult)
+	logins[MethodEmail] = f.loginEmail(t, "user@example.com")
+	var err error
+	logins[MethodWechat], err = f.service.LoginWechat(ctx, "provider-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logins[MethodPassword], err = f.service.LoginPassword(ctx, PasswordLoginInput{
+		Identifier: "user@example.com", Password: "valid-password", IP: "192.0.2.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for method, login := range logins {
+		t.Run(method, func(t *testing.T) {
+			stored := f.store.sessions[digest(login.Token)]
+			if stored.Method != method || stored.AccountID != accountID {
+				t.Fatalf("stored session = %+v, want method %q", stored, method)
+			}
+			for name, authenticate := range map[string]func(context.Context, string) (*AuthenticatedSession, error){
+				"service":     f.service.AuthenticateSession,
+				"transaction": f.service.InTransaction(f.store, nil).AuthenticateSession,
+			} {
+				t.Run(name, func(t *testing.T) {
+					session, err := authenticate(ctx, login.Token)
+					if err != nil || session.Method != method || session.Account.ID != accountID || session.Actor != nil {
+						t.Fatalf("authenticated session = %+v, %v; want method %q", session, err, method)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestAuthenticateSessionKeepsLegacyMethodUnknown(t *testing.T) {
+	f := newBlacklistFixture(t)
+	ctx := context.Background()
+	login := f.loginEmail(t, "user@example.com")
+	stored := f.store.sessions[digest(login.Token)]
+	stored.Method = ""
+	f.store.sessions[stored.Hash] = stored
+	for name, authenticate := range map[string]func(context.Context, string) (*AuthenticatedSession, error){
+		"service":     f.service.AuthenticateSession,
+		"transaction": f.service.InTransaction(f.store, nil).AuthenticateSession,
+	} {
+		t.Run(name, func(t *testing.T) {
+			session, err := authenticate(ctx, login.Token)
+			if err != nil || session.Method != "" || session.Account.ID != login.Account.ID {
+				t.Fatalf("legacy session = %+v, %v", session, err)
+			}
+		})
+	}
+}
+
+func TestLoginAsInheritsParentLoginMethod(t *testing.T) {
+	f := newBlacklistFixture(t)
+	ctx := context.Background()
+	if _, err := f.service.CreatePasswordAccount(ctx, CreatePasswordAccountInput{
+		Identifier: "admin", Password: "valid-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := f.service.LoginPassword(ctx, PasswordLoginInput{
+		Identifier: "admin", Password: "valid-password", IP: "192.0.2.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := f.loginEmail(t, "target@example.com")
+	child, err := f.service.LoginAs(ctx, parent.Token, target.Account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := f.store.sessions[digest(child.Token)]
+	if stored.Method != MethodPassword {
+		t.Fatalf("derived session method = %q, want %q", stored.Method, MethodPassword)
+	}
+	for name, authenticate := range map[string]func(context.Context, string) (*AuthenticatedSession, error){
+		"service":     f.service.AuthenticateSession,
+		"transaction": f.service.InTransaction(f.store, nil).AuthenticateSession,
+	} {
+		t.Run(name, func(t *testing.T) {
+			session, err := authenticate(ctx, child.Token)
+			if err != nil || session.Method != MethodPassword || session.Account.ID != target.Account.ID || session.Actor == nil || session.Actor.ID != parent.Account.ID {
+				t.Fatalf("derived session = %+v, %v", session, err)
+			}
+		})
+	}
+}
+
 func TestLoginAsUsesRevocableSessionAndReturnsActor(t *testing.T) {
 	f := newBlacklistFixture(t)
 	ctx := context.Background()

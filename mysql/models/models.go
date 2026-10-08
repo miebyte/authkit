@@ -47,11 +47,12 @@ type Rate struct {
 // TableName 返回发送频率表名。
 func (Rate) TableName() string { return "auth_rates" }
 
-// Session 持久化应用会话摘要，从不保存明文凭证。
+// Session 持久化应用会话摘要及登录方式，从不保存明文凭证。
 type Session struct {
 	ParentHash string    `gorm:"column:parent_hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;default:''"`
 	Hash       string    `gorm:"column:hash;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;primaryKey"`
 	AccountID  string    `gorm:"column:account_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;index:account_id"`
+	Method     string    `gorm:"column:method;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;default:''"`
 	Expires    time.Time `gorm:"column:expires;type:datetime(6);not null;index:expires"`
 }
 

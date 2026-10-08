@@ -133,17 +133,19 @@ logoutErr := service.Logout(ctx, tokenFromRequest)
 
 `SendCodeInput.IP` 由宿主根据可信代理配置取得；空值会让这类请求共用同一个 IP 限流桶。`LoginResult` 包含 `Account`、明文 `Token`、`Expires` 和 `Created`。账号 ID 和 Token 均为 256 位随机值，编码成 64 个十六进制字符。Token 只在创建会话时返回；`Logout` 仅撤销传入的会话，重复退出可安全重试。
 
+需要读取 Token 的登录方式时，调用 `Service.AuthenticateSession(ctx, token)` 或 `Transaction.AuthenticateSession(ctx, token)`，从返回值的 `Method` 获取 `MethodEmail`（`email`）、`MethodWechat`（`wechat`）或 `MethodPassword`（`password`）。该字段记录签发 Token 时实际使用的绑定方式，不随账号其他绑定变化。
+
 ### 管理员代登录
 
 可信宿主完成管理员授权后，可调用 `service.LoginAs(ctx, parentToken, targetAccountID)`，返回与普通登录相同的 `*LoginResult`。代登录复用随机 Token 签发及 `auth_sessions`，仅增加 `parent_hash` 保存父会话摘要，不保存父 Token 明文。代登录期限不超过父会话剩余期限，且代登录会话不能再次派生。
 
 需要与业务授权原子提交时，在宿主事务中先调用 `Transaction.AuthenticateSession(ctx, parentToken)`，检查当前账号角色及状态，再调用 `Transaction.LoginAs(ctx, parentToken, targetAccountID)` 并检查目标业务资料；任一检查失败均回滚，提交成功后才返回 Token。
 
-所有需要支持代登录的请求都应调用 `Service.AuthenticateSession(ctx, token)`。返回值为 `AuthenticatedSession{Account, Actor, Expires}`：`Account` 是当前操作的目标账号，普通会话的 `Actor` 为 `nil`，代登录的 `Actor` 是父会话所属账号。authkit 验证双方会话、账号和黑名单；**宿主必须在每次请求时检查 Actor 仍有管理员权限并满足业务状态要求**，同时按业务规则限制代登录操作。
+所有需要支持代登录的请求都应调用 `Service.AuthenticateSession(ctx, token)`。返回值为 `AuthenticatedSession{Account, Actor, Method, Expires}`：`Account` 是当前操作的目标账号，普通会话的 `Actor` 为 `nil`，代登录的 `Actor` 是父会话所属账号，`Method` 沿用父会话的登录方式，表示 Actor 使用的绑定方式。authkit 验证双方会话、账号和黑名单；**宿主必须在每次请求时检查 Actor 仍有管理员权限并满足业务状态要求**，同时按业务规则限制代登录操作。
 
 `Authenticate` 仍返回当前 `Account`，也会检查父会话有效性，但不会返回 Actor，因此不能用于需要管理员业务授权的代登录请求。内置超管后台只接受普通会话。父会话退出、过期或因改密、黑名单、管理操作被撤销后，派生会话即失效；目标账号改密也会撤销派生会话。退出派生会话只撤销该会话，不影响父会话或兄弟会话。
 
-升级时需重新运行 `authmysql.Models()` 迁移，为现有 `auth_sessions` 添加默认空字符串的 `parent_hash` 字段。自定义存储需实现新增的 `SessionRepository.Get(ctx, hash)`，按摘要返回 `Session`（含 `ParentHash`），不存在时返回 `ErrNotFound`。
+升级时需重新运行 `db.AutoMigrate(authmysql.Models()...)`，为现有 `auth_sessions` 添加默认空字符串的 `parent_hash` 和 `method` 字段。旧会话无法恢复签发时使用的绑定方式，`Method` 返回空字符串，仍可正常验证；重新登录后才会记录方式。自定义存储需持久化并读取 `Session.Method`，并实现 `SessionRepository.Get(ctx, hash)`，按摘要返回 `Session`（含 `ParentHash`），不存在时返回 `ErrNotFound`。
 
 ### 微信登录
 

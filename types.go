@@ -40,19 +40,22 @@ type Challenge struct {
 	Ready    bool
 }
 
-// Session 只保存应用凭证的摘要。
+// Session 保存应用凭证的摘要和签发时使用的绑定方式。
 type Session struct {
 	Hash       string
 	AccountID  string
+	Method     string
 	Expires    time.Time
 	ParentHash string
 }
 
 // AuthenticatedSession 返回当前账号及代登录的真实发起账号；普通会话的 Actor 为空。
+// Method 是签发时使用的绑定方式，代登录沿用父会话的方式；旧会话未记录时为空。
 // 宿主必须在签发代登录前及每次使用时检查 Actor 的角色与业务状态。
 type AuthenticatedSession struct {
 	Account Account
 	Actor   *Account
+	Method  string
 	Expires time.Time
 }
 

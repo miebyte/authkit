@@ -89,7 +89,7 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	if err != nil {
 		return Outcome{}, err
 	}
-	return t.finishLogin(ctx, user, challenge, created, now)
+	return t.finishLogin(ctx, user, input.method, challenge, created, now)
 }
 
 // findCodeAccount 加载已经绑定到该验证码目标的账号。
@@ -138,7 +138,7 @@ func (t *Transaction) LoginWechat(
 			return Outcome{}, err
 		}
 	}
-	return t.finishLogin(ctx, user, nil, created, now)
+	return t.finishLogin(ctx, user, MethodWechat, nil, created, now)
 }
 
 // verifyCode 把预期的证明失败单独返回，以便尝试次数能够提交。
@@ -386,13 +386,14 @@ func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInpu
 	if !t.passwordAlgorithm.verifyPassword(input.Password, hash) || requiredAccountID != "" && account.ID != requiredAccountID {
 		return Outcome{Rejected: ErrInvalidCredentials}, nil
 	}
-	return t.finishLogin(ctx, account, nil, false, now)
+	return t.finishLogin(ctx, account, MethodPassword, nil, false, now)
 }
 
-// finishLogin 消费可选的邮箱证明，并且只持久化令牌摘要。
+// finishLogin 消费可选的邮箱证明，并持久化令牌摘要和登录绑定方式。
 func (t *Transaction) finishLogin(
 	ctx context.Context,
 	account *Account,
+	method string,
 	challenge *Challenge,
 	created bool,
 	now time.Time,
@@ -406,25 +407,25 @@ func (t *Transaction) finishLogin(
 			return Outcome{}, err
 		}
 	}
-	login, err := t.createSession(ctx, account, "", now.Add(SessionTTL), created)
+	login, err := t.createSession(ctx, account, method, "", now.Add(SessionTTL), created)
 	return Outcome{Login: login}, err
 }
 
-// createSession 为普通登录和代登录统一生成令牌并持久化摘要。
-func (t *Transaction) createSession(ctx context.Context, account *Account, parentHash string, expires time.Time, created bool) (*LoginResult, error) {
+// createSession 为普通登录和代登录统一生成令牌并持久化摘要及绑定方式。
+func (t *Transaction) createSession(ctx context.Context, account *Account, method, parentHash string, expires time.Time, created bool) (*LoginResult, error) {
 	token, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	if err := t.repos.Sessions().Create(ctx, &Session{
-		Hash: digest(token), AccountID: account.ID, Expires: expires, ParentHash: parentHash,
+		Hash: digest(token), AccountID: account.ID, Method: method, Expires: expires, ParentHash: parentHash,
 	}); err != nil {
 		return nil, err
 	}
 	return &LoginResult{Account: *account, Token: token, Expires: expires, Created: created}, nil
 }
 
-// AuthenticateSession 在宿主事务内验证会话及其父会话，供宿主执行业务授权。
+// AuthenticateSession 在宿主事务内验证会话及其父会话，返回绑定方式及宿主授权所需的账号。
 func (t *Transaction) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
 	return authenticateSession(ctx, t.repos, token, t.now().UTC())
 }
@@ -454,7 +455,7 @@ func (t *Transaction) LoginAs(ctx context.Context, parentToken, accountID string
 	if parent.Expires.Before(expires) {
 		expires = parent.Expires
 	}
-	return t.createSession(ctx, account, digest(parentToken), expires, false)
+	return t.createSession(ctx, account, parent.Method, digest(parentToken), expires, false)
 }
 
 // authenticateSession 对格式错误的凭证跳过数据库查询，并限制父子关系只有一层。
@@ -466,7 +467,7 @@ func authenticateSession(ctx context.Context, repos Repositories, token string, 
 	if err != nil {
 		return nil, err
 	}
-	result := &AuthenticatedSession{Account: *account, Expires: session.Expires}
+	result := &AuthenticatedSession{Account: *account, Method: session.Method, Expires: session.Expires}
 	if session.ParentHash != "" {
 		parent, actor, err := activeSession(ctx, repos, session.ParentHash, now)
 		if err != nil {

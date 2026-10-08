@@ -184,7 +184,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Account, err
 	return &session.Account, nil
 }
 
-// AuthenticateSession 验证会话及其父会话，返回宿主授权所需的真实发起账号。
+// AuthenticateSession 验证会话及其父会话，返回绑定方式及宿主授权所需的真实发起账号。
 func (s *Service) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
 	return authenticateSession(ctx, s.store, token, s.now().UTC())
 }
