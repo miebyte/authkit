@@ -16,7 +16,8 @@ func TestLegacyBcryptPasswordVerification(t *testing.T) {
 		original := string(hash)
 		for _, prefix := range []string{"$2a$", "$2b$", "$2y$"} {
 			encoded := prefix + original[4:]
-			if !IsLegacyPasswordHash(encoded) || !PasswordAlgorithmBcrypt.verifyPassword(password, encoded) {
+			if !IsLegacyPasswordHash(encoded) ||
+				!PasswordAlgorithmBcrypt.verifyPassword(password, encoded) {
 				t.Fatalf("supported legacy digest rejected for %s", prefix)
 			}
 			if PasswordAlgorithmBcrypt.verifyPassword("incorrect", encoded) {
@@ -39,7 +40,8 @@ func TestLegacyBcryptRejectsMalformedOrUnboundedHashes(t *testing.T) {
 	}
 	encoded := string(hash)
 	for _, invalid := range []string{"", encoded[:59], encoded[:6] + "!" + encoded[7:], "$2x$" + encoded[4:], encoded[:4] + "31" + encoded[6:], encoded[:7] + strings.Repeat("!", 53)} {
-		if IsLegacyPasswordHash(invalid) || PasswordAlgorithmBcrypt.verifyPassword("old123", invalid) {
+		if IsLegacyPasswordHash(invalid) ||
+			PasswordAlgorithmBcrypt.verifyPassword("old123", invalid) {
 			t.Fatal("unsupported legacy digest accepted")
 		}
 	}

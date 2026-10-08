@@ -83,7 +83,11 @@ func (s *Service) AdminOverview(ctx context.Context) (AdminOverview, error) {
 }
 
 // AdminListAccounts 搜索账号；调用方必须完成管理员鉴权。
-func (s *Service) AdminListAccounts(ctx context.Context, query string, page, limit int) (AdminAccountPage, error) {
+func (s *Service) AdminListAccounts(
+	ctx context.Context,
+	query string,
+	page, limit int,
+) (AdminAccountPage, error) {
 	repo, err := s.adminRepository()
 	if err != nil {
 		return AdminAccountPage{}, err

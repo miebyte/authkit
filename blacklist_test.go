@@ -78,7 +78,11 @@ func TestBlacklistDisablesAllBindingsAndDoesNotRestoreOldProofs(t *testing.T) {
 			_, err = f.service.LoginWechat(context.Background(), "provider-code")
 			requireBlacklistError(t, err, ErrBlacklisted)
 			for _, token := range []string{emailLogin.Token, wechatLogin.Token} {
-				if account, err := f.service.Authenticate(context.Background(), token); err == nil || account != nil {
+				if account, err := f.service.Authenticate(
+					context.Background(),
+					token,
+				); err == nil ||
+					account != nil {
 					t.Fatal("blacklisted account retained an existing session")
 				}
 			}
@@ -90,7 +94,10 @@ func TestBlacklistDisablesAllBindingsAndDoesNotRestoreOldProofs(t *testing.T) {
 			if err != nil || len(page.Items) != 1 {
 				t.Fatalf("blacklist = %+v, err = %v", page, err)
 			}
-			if err := f.service.RemoveBlacklist(context.Background(), page.Items[0].ID); err != nil {
+			if err := f.service.RemoveBlacklist(
+				context.Background(),
+				page.Items[0].ID,
+			); err != nil {
 				t.Fatal(err)
 			}
 			for _, token := range []string{emailLogin.Token, wechatLogin.Token} {
@@ -120,7 +127,9 @@ func TestBlacklistAuthenticateChecksAccountBindings(t *testing.T) {
 	login := f.loginEmail(t, "user@example.com")
 	// Authenticate 必须独立检查绑定，覆盖黑名单已有记录但会话仍存在的情况。
 	f.store.entries[blacklistCredentialKey(Credential{Method: MethodEmail, Identifier: "user@example.com"})] = BlacklistEntry{
-		ID: strings.Repeat("b", 64), Method: MethodEmail, Identifier: "user@example.com",
+		ID:         strings.Repeat("b", 64),
+		Method:     MethodEmail,
+		Identifier: "user@example.com",
 	}
 	account, err := f.service.Authenticate(context.Background(), login.Token)
 	requireBlacklistError(t, err, ErrBlacklisted)
@@ -169,7 +178,10 @@ func TestBlacklistAddedDuringDeliveryCannotActivateCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	err := f.service.SendCode(context.Background(), SendCodeInput{Email: "user@example.com", IP: "192.0.2.1"})
+	err := f.service.SendCode(
+		context.Background(),
+		SendCodeInput{Email: "user@example.com", IP: "192.0.2.1"},
+	)
 	requireBlacklistError(t, err, ErrBlacklisted)
 	if f.store.challenges["user@example.com"].Ready {
 		t.Fatal("code was activated after its email was blacklisted during delivery")
@@ -188,7 +200,10 @@ func TestBlacklistStorageFailureRejectsRequests(t *testing.T) {
 				_, err = f.service.Authenticate(context.Background(), login.Token)
 			} else if operation == "activate" {
 				f.mail.afterSend = func() { f.store.checkError = backendError }
-				err = f.service.SendCode(context.Background(), SendCodeInput{Email: "user@example.com"})
+				err = f.service.SendCode(
+					context.Background(),
+					SendCodeInput{Email: "user@example.com"},
+				)
 				if f.store.challenges["user@example.com"].Ready {
 					t.Fatal("failed blacklist lookup activated a code")
 				}
@@ -198,7 +213,10 @@ func TestBlacklistStorageFailureRejectsRequests(t *testing.T) {
 				}
 				code := f.sendCode(t, "user@example.com")
 				f.store.accountCheckError = backendError
-				_, err = f.service.LoginEmail(context.Background(), EmailLoginInput{Email: "user@example.com", Code: code})
+				_, err = f.service.LoginEmail(
+					context.Background(),
+					EmailLoginInput{Email: "user@example.com", Code: code},
+				)
 				if !f.store.challenges["user@example.com"].Ready || len(f.store.sessions) != 0 {
 					t.Fatal("failed account blacklist lookup consumed the code or issued a session")
 				}
@@ -209,15 +227,23 @@ func TestBlacklistStorageFailureRejectsRequests(t *testing.T) {
 				f.store.accountCheckError = backendError
 				_, err = f.service.LoginWechat(context.Background(), "provider-code")
 				if len(f.store.accounts) != 0 || len(f.store.sessions) != 0 {
-					t.Fatal("failed account blacklist lookup persisted a new WeChat account or session")
+					t.Fatal(
+						"failed account blacklist lookup persisted a new WeChat account or session",
+					)
 				}
 			} else {
 				f.store.checkError = backendError
 				switch operation {
 				case "send":
-					err = f.service.SendCode(context.Background(), SendCodeInput{Email: "user@example.com"})
+					err = f.service.SendCode(
+						context.Background(),
+						SendCodeInput{Email: "user@example.com"},
+					)
 				case "email":
-					_, err = f.service.LoginEmail(context.Background(), EmailLoginInput{Email: "user@example.com", Code: "123456"})
+					_, err = f.service.LoginEmail(
+						context.Background(),
+						EmailLoginInput{Email: "user@example.com", Code: "123456"},
+					)
 				case "wechat":
 					_, err = f.service.LoginWechat(context.Background(), "provider-code")
 				}
@@ -233,11 +259,17 @@ func TestBlacklistStorageFailureRejectsRequests(t *testing.T) {
 func TestBlacklistNormalizesEmailAndPreservesOpenIDCase(t *testing.T) {
 	f := newBlacklistFixture(t)
 	for _, email := range []string{" User@Example.COM ", "user@example.com"} {
-		if err := f.service.AddBlacklist(context.Background(), Credential{Method: MethodEmail, Identifier: email}); err != nil {
+		if err := f.service.AddBlacklist(
+			context.Background(),
+			Credential{Method: MethodEmail, Identifier: email},
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := f.service.AddBlacklist(context.Background(), Credential{Method: MethodWechat, Identifier: "MixedCaseOpenID"}); err != nil {
+	if err := f.service.AddBlacklist(
+		context.Background(),
+		Credential{Method: MethodWechat, Identifier: "MixedCaseOpenID"},
+	); err != nil {
 		t.Fatal(err)
 	}
 	page, err := f.service.ListBlacklist(context.Background(), 1, 10)
@@ -261,7 +293,11 @@ func TestBlacklistNormalizesEmailAndPreservesOpenIDCase(t *testing.T) {
 			t.Fatalf("CreatedAt = %v, want %v", entry.CreatedAt, f.now)
 		}
 	}
-	requireBlacklistError(t, f.service.SendCode(context.Background(), SendCodeInput{Email: " USER@EXAMPLE.COM "}), ErrBlacklisted)
+	requireBlacklistError(
+		t,
+		f.service.SendCode(context.Background(), SendCodeInput{Email: " USER@EXAMPLE.COM "}),
+		ErrBlacklisted,
+	)
 	f.wechat.identity.OpenID = "MixedCaseOpenID"
 	_, err = f.service.LoginWechat(context.Background(), "provider-code")
 	requireBlacklistError(t, err, ErrBlacklisted)
@@ -290,7 +326,10 @@ func TestBlacklistRejectsInvalidCredentials(t *testing.T) {
 		})
 	}
 	f := newBlacklistFixture(t)
-	if err := f.service.AddBlacklist(context.Background(), Credential{Method: MethodWechat, Identifier: strings.Repeat("a", 128)}); err != nil {
+	if err := f.service.AddBlacklist(
+		context.Background(),
+		Credential{Method: MethodWechat, Identifier: strings.Repeat("a", 128)},
+	); err != nil {
 		t.Fatalf("valid OpenID length was rejected: %v", err)
 	}
 }
@@ -303,7 +342,11 @@ func TestAdminBlacklistProtectsConfiguredAccount(t *testing.T) {
 		{Method: MethodEmail, Identifier: " ADMIN@Example.com "},
 		{Method: MethodWechat, Identifier: "AdminOpenID"},
 	} {
-		requireBlacklistError(t, f.service.AdminAddBlacklist(context.Background(), credential, adminID), ErrProtectedAccount)
+		requireBlacklistError(
+			t,
+			f.service.AdminAddBlacklist(context.Background(), credential, adminID),
+			ErrProtectedAccount,
+		)
 	}
 	if len(f.store.entries) != 0 {
 		t.Fatal("administrator's binding was blacklisted")
@@ -318,7 +361,11 @@ func TestAdminBlacklistProtectsConfiguredAccount(t *testing.T) {
 func TestBlacklistManagementRejectsInvalidInput(t *testing.T) {
 	f := newBlacklistFixture(t)
 	for _, id := range []string{"", "invalid-id"} {
-		requireBlacklistError(t, f.service.RemoveBlacklist(context.Background(), id), ErrInvalidInput)
+		requireBlacklistError(
+			t,
+			f.service.RemoveBlacklist(context.Background(), id),
+			ErrInvalidInput,
+		)
 		requireBlacklistError(t, f.service.AdminAddBlacklist(context.Background(), Credential{
 			Method: MethodEmail, Identifier: "user@example.com",
 		}, id), ErrInvalidInput)
@@ -354,10 +401,13 @@ func newBlacklistFixture(t *testing.T) *blacklistFixture {
 			entries:   make(map[string]BlacklistEntry),
 			passwords: make(map[string]string), rates: make(map[string]blacklistRate),
 		},
-		mail: &blacklistMail{}, wechat: &blacklistWechat{identity: WechatIdentity{AppID: "test-app", OpenID: "TestOpenID"}},
-		now: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
+		mail:   &blacklistMail{},
+		wechat: &blacklistWechat{identity: WechatIdentity{AppID: "test-app", OpenID: "TestOpenID"}},
+		now:    time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
 	}
-	f.policy = RegistrationPolicyFunc(func(context.Context, Registration) error { f.authorized++; return nil })
+	f.policy = RegistrationPolicyFunc(
+		func(context.Context, Registration) error { f.authorized++; return nil },
+	)
 	var err error
 	f.service, err = NewService(f.store, f.mail, f.wechat, f.policy)
 	if err != nil {
@@ -369,7 +419,10 @@ func newBlacklistFixture(t *testing.T) *blacklistFixture {
 
 func (f *blacklistFixture) sendCode(t *testing.T, email string) string {
 	t.Helper()
-	if err := f.service.SendCode(context.Background(), SendCodeInput{Email: email, IP: "192.0.2.1"}); err != nil {
+	if err := f.service.SendCode(
+		context.Background(),
+		SendCodeInput{Email: email, IP: "192.0.2.1"},
+	); err != nil {
 		t.Fatal(err)
 	}
 	return f.mail.code
@@ -378,7 +431,10 @@ func (f *blacklistFixture) sendCode(t *testing.T, email string) string {
 func (f *blacklistFixture) loginEmail(t *testing.T, email string) *LoginResult {
 	t.Helper()
 	code := f.sendCode(t, email)
-	result, err := f.service.LoginEmail(context.Background(), EmailLoginInput{Email: email, Code: code})
+	result, err := f.service.LoginEmail(
+		context.Background(),
+		EmailLoginInput{Email: email, Code: code},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,9 +483,18 @@ type blacklistMemoryStore struct {
 	challengeReads    int
 }
 
-func (s *blacklistMemoryStore) WithTransaction(_ context.Context, fn func(Repositories) error) error {
+func (s *blacklistMemoryStore) WithTransaction(
+	_ context.Context,
+	fn func(Repositories) error,
+) error {
 	accounts, bindings := maps.Clone(s.accounts), maps.Clone(s.bindings)
-	challenges, sessions, entries := maps.Clone(s.challenges), maps.Clone(s.sessions), maps.Clone(s.entries)
+	challenges, sessions, entries := maps.Clone(
+		s.challenges,
+	), maps.Clone(
+		s.sessions,
+	), maps.Clone(
+		s.entries,
+	)
 	passwords, rates := maps.Clone(s.passwords), maps.Clone(s.rates)
 	if err := fn(s); err != nil {
 		s.accounts, s.bindings, s.challenges, s.sessions, s.entries = accounts, bindings, challenges, sessions, entries
@@ -469,11 +534,17 @@ func (r blacklistAccounts) GetByID(_ context.Context, id string) (*Account, erro
 	return &account, nil
 }
 
-func (r blacklistAccounts) GetByPasswordIdentifier(_ context.Context, identifier string) (*Account, error) {
+func (r blacklistAccounts) GetByPasswordIdentifier(
+	_ context.Context,
+	identifier string,
+) (*Account, error) {
 	return r.lookup(Credential{Method: MethodPassword, Identifier: identifier})
 }
 
-func (r blacklistAccounts) GetPasswordIdentifier(_ context.Context, accountID string) (string, error) {
+func (r blacklistAccounts) GetPasswordIdentifier(
+	_ context.Context,
+	accountID string,
+) (string, error) {
 	for key, owner := range r.store.bindings {
 		if owner == accountID && strings.HasPrefix(key, MethodPassword+"\x00") {
 			return strings.TrimPrefix(key, MethodPassword+"\x00"), nil
@@ -499,7 +570,11 @@ func (r blacklistAccounts) GetByWechat(_ context.Context, hash string) (*Account
 	return r.lookup(Credential{Method: MethodWechat, Identifier: hash})
 }
 
-func (r blacklistAccounts) Create(_ context.Context, account *Account, credential Credential) error {
+func (r blacklistAccounts) Create(
+	_ context.Context,
+	account *Account,
+	credential Credential,
+) error {
 	key := blacklistCredentialKey(credential)
 	if _, ok := r.store.bindings[key]; ok {
 		return ErrConflict
@@ -508,7 +583,11 @@ func (r blacklistAccounts) Create(_ context.Context, account *Account, credentia
 	return nil
 }
 
-func (r blacklistAccounts) GetBySessionToken(_ context.Context, hash string, now time.Time) (*Account, error) {
+func (r blacklistAccounts) GetBySessionToken(
+	_ context.Context,
+	hash string,
+	now time.Time,
+) (*Account, error) {
 	session, ok := r.store.sessions[hash]
 	if !ok || !now.Before(session.Expires) {
 		return nil, ErrNotFound
@@ -551,12 +630,19 @@ func (r blacklistAccounts) GetPasswordHash(_ context.Context, accountID string) 
 	return hash, nil
 }
 
-func (r blacklistAccounts) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+func (r blacklistAccounts) SetPasswordHash(
+	ctx context.Context,
+	accountID, identifier, hash string,
+) error {
 	key := blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: identifier})
 	if owner := r.store.bindings[key]; owner != "" && owner != accountID {
 		return ErrConflict
 	}
-	if existing, err := r.GetPasswordIdentifier(ctx, accountID); err == nil && existing != identifier {
+	if existing, err := r.GetPasswordIdentifier(
+		ctx,
+		accountID,
+	); err == nil &&
+		existing != identifier {
 		return ErrConflict
 	}
 	r.store.bindings[key], r.store.passwords[accountID] = accountID, hash
@@ -679,18 +765,32 @@ func (r blacklistRepository) List(_ context.Context, page, limit int) (Blacklist
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	start := min((page-1)*limit, len(items))
 	end := min(start+limit, len(items))
-	return BlacklistPage{Items: items[start:end], Total: int64(len(items)), Page: page, Limit: limit}, nil
+	return BlacklistPage{
+		Items: items[start:end],
+		Total: int64(len(items)),
+		Page:  page,
+		Limit: limit,
+	}, nil
 }
 
 func (s *blacklistMemoryStore) AdminOverview(context.Context, time.Time) (AdminOverview, error) {
 	return AdminOverview{Accounts: int64(len(s.accounts))}, nil
 }
 
-func (s *blacklistMemoryStore) AdminListAccounts(_ context.Context, _ string, page, limit int, _ time.Time) (AdminAccountPage, error) {
+func (s *blacklistMemoryStore) AdminListAccounts(
+	_ context.Context,
+	_ string,
+	page, limit int,
+	_ time.Time,
+) (AdminAccountPage, error) {
 	return AdminAccountPage{Page: page, Limit: limit, Total: int64(len(s.accounts))}, nil
 }
 
-func (s *blacklistMemoryStore) AdminGetAccount(_ context.Context, id string, _ time.Time) (AdminAccountDetail, error) {
+func (s *blacklistMemoryStore) AdminGetAccount(
+	_ context.Context,
+	id string,
+	_ time.Time,
+) (AdminAccountDetail, error) {
 	account, ok := s.accounts[id]
 	if !ok {
 		return AdminAccountDetail{}, ErrNotFound

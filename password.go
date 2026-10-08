@@ -29,7 +29,8 @@ func NormalizeUsername(value string) (string, error) {
 	if strings.Contains(value, "@") {
 		return NormalizeEmail(value)
 	}
-	if !utf8.ValidString(value) || utf8.RuneCountInString(value) < 3 || utf8.RuneCountInString(value) > 64 {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) < 3 ||
+		utf8.RuneCountInString(value) > 64 {
 		return "", ErrInvalidInput
 	}
 	for _, character := range value {
@@ -56,12 +57,19 @@ func hashPassword(password string) (string, error) {
 		return "", err
 	}
 	hash := argon2.IDKey([]byte(password), salt, passwordTime, passwordMemory, 1, 32)
-	return passwordPrefix + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash), nil
+	return passwordPrefix + base64.RawStdEncoding.EncodeToString(
+		salt,
+	) + "$" + base64.RawStdEncoding.EncodeToString(
+		hash,
+	), nil
 }
 
 // IsLegacyPasswordHash 判断可安全导入的历史 bcrypt 摘要，不需要密码明文。
 func IsLegacyPasswordHash(encoded string) bool {
-	if len(encoded) != 60 || encoded[4] < '0' || encoded[4] > '9' || encoded[5] < '0' || encoded[5] > '9' || encoded[6] != '$' || !(strings.HasPrefix(encoded, "$2a$") || strings.HasPrefix(encoded, "$2b$") || strings.HasPrefix(encoded, "$2y$")) {
+	if len(encoded) != 60 || encoded[4] < '0' || encoded[4] > '9' || encoded[5] < '0' ||
+		encoded[5] > '9' ||
+		encoded[6] != '$' ||
+		!(strings.HasPrefix(encoded, "$2a$") || strings.HasPrefix(encoded, "$2b$") || strings.HasPrefix(encoded, "$2y$")) {
 		return false
 	}
 	cost, err := bcrypt.Cost([]byte(encoded))
@@ -83,7 +91,8 @@ func verifyPassword(password, encoded string) bool {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(encoded, passwordPrefix), "$")
-	if !strings.HasPrefix(encoded, passwordPrefix) || len(parts) != 2 || len(parts[0]) != 22 || len(parts[1]) != 43 {
+	if !strings.HasPrefix(encoded, passwordPrefix) || len(parts) != 2 || len(parts[0]) != 22 ||
+		len(parts[1]) != 43 {
 		verifyPassword(password, dummyPasswordHash)
 		return false
 	}
@@ -113,7 +122,8 @@ func rejectPasswordCredentials(password string, algorithm PasswordAlgorithm) (Ou
 
 // validPassword 按所选算法额外限制 bcrypt 的字节长度。
 func (algorithm PasswordAlgorithm) validPassword(password string, minimum int) bool {
-	return validPassword(password, minimum) && (algorithm != PasswordAlgorithmBcrypt || len(password) <= 72)
+	return validPassword(password, minimum) &&
+		(algorithm != PasswordAlgorithmBcrypt || len(password) <= 72)
 }
 
 func (algorithm PasswordAlgorithm) hashPassword(password string) (string, error) {

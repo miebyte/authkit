@@ -34,7 +34,13 @@ func SessionDomainToModel(s *authkit.Session) *models.Session {
 	if s == nil {
 		return nil
 	}
-	return &models.Session{Hash: s.Hash, AccountID: s.AccountID, Method: s.Method, Expires: s.Expires, ParentHash: s.ParentHash}
+	return &models.Session{
+		Hash:       s.Hash,
+		AccountID:  s.AccountID,
+		Method:     s.Method,
+		Expires:    s.Expires,
+		ParentHash: s.ParentHash,
+	}
 }
 
 // SessionModelToDomain 恢复会话的账号、登录方式、期限和父会话摘要。
@@ -42,5 +48,11 @@ func SessionModelToDomain(s *models.Session) *authkit.Session {
 	if s == nil {
 		return nil
 	}
-	return &authkit.Session{Hash: s.Hash, AccountID: s.AccountID, Method: s.Method, Expires: s.Expires, ParentHash: s.ParentHash}
+	return &authkit.Session{
+		Hash:       s.Hash,
+		AccountID:  s.AccountID,
+		Method:     s.Method,
+		Expires:    s.Expires,
+		ParentHash: s.ParentHash,
+	}
 }

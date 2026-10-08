@@ -62,7 +62,8 @@ func (r *blacklistRepository) Add(ctx context.Context, entry authkit.BlacklistEn
 	if !current.Blocked {
 		if err := r.db.WithContext(ctx).Model(&models.Blacklist{}).
 			Where("id = ?", current.ID).
-			Updates(map[string]any{"blocked": true, "created_at": entry.CreatedAt.UTC()}).Error; err != nil {
+			Updates(map[string]any{"blocked": true, "created_at": entry.CreatedAt.UTC()}).
+			Error; err != nil {
 			return mapError(err)
 		}
 	}
@@ -99,7 +100,10 @@ func (r *blacklistRepository) Remove(ctx context.Context, id string) error {
 }
 
 // List 仅返回禁用条目，按加入时间及 ID 稳定分页，并隐藏微信凭证摘要。
-func (r *blacklistRepository) List(ctx context.Context, page, limit int) (authkit.BlacklistPage, error) {
+func (r *blacklistRepository) List(
+	ctx context.Context,
+	page, limit int,
+) (authkit.BlacklistPage, error) {
 	if page < 1 || limit < 1 || page-1 > int(^uint(0)>>1)/limit {
 		return authkit.BlacklistPage{}, authkit.ErrInvalidInput
 	}
@@ -114,7 +118,11 @@ func (r *blacklistRepository) List(ctx context.Context, page, limit int) (authki
 		return authkit.BlacklistPage{}, mapError(err)
 	}
 	for _, entry := range entries {
-		item := authkit.BlacklistEntry{ID: entry.ID, Method: entry.Method, CreatedAt: entry.CreatedAt}
+		item := authkit.BlacklistEntry{
+			ID:        entry.ID,
+			Method:    entry.Method,
+			CreatedAt: entry.CreatedAt,
+		}
 		if entry.Method == authkit.MethodEmail || entry.Method == authkit.MethodPassword {
 			item.Identifier = entry.Identifier
 		}
@@ -124,7 +132,10 @@ func (r *blacklistRepository) List(ctx context.Context, page, limit int) (authki
 }
 
 // lock 通过自更新立即取得排他锁，避免首次检查同一凭证时升级共享锁。
-func (r *blacklistRepository) lock(ctx context.Context, credential authkit.Credential) (*models.Blacklist, error) {
+func (r *blacklistRepository) lock(
+	ctx context.Context,
+	credential authkit.Credential,
+) (*models.Blacklist, error) {
 	id := blacklistID(credential)
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		DoUpdates: clause.AssignmentColumns([]string{"id"}),

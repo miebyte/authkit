@@ -46,7 +46,12 @@ func NewService(
 // InTransaction 把身份操作绑定到已经处于宿主事务中的仓储。
 // 它不会开启或提交事务。传入的策略会替换独立策略，其写入必须使用同一个宿主事务。
 func (s *Service) InTransaction(repos Repositories, policy RegistrationPolicy) *Transaction {
-	return &Transaction{repos: repos, registration: policy, now: s.now, passwordAlgorithm: s.passwordAlgorithm}
+	return &Transaction{
+		repos:             repos,
+		registration:      policy,
+		now:               s.now,
+		passwordAlgorithm: s.passwordAlgorithm,
+	}
 }
 
 // SendCode 先持久化待发送验证码，在事务外发送，再只激活同一条验证码。
@@ -70,7 +75,8 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 		Sent: now, Expires: now.Add(CodeTTL),
 	}
 	err = s.store.WithTransaction(ctx, func(repos Repositories) error {
-		if err := repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
+		if err := repos.Blacklist().
+			Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
 			return err
 		}
 		if err := checkEmailAccount(ctx, repos, email); err != nil {
@@ -105,7 +111,8 @@ func (s *Service) SendCode(ctx context.Context, input SendCodeInput) error {
 	}
 
 	return s.store.WithTransaction(ctx, func(repos Repositories) error {
-		if err := repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
+		if err := repos.Blacklist().
+			Check(ctx, Credential{Method: MethodEmail, Identifier: email}); err != nil {
 			return err
 		}
 		if err := checkEmailAccount(ctx, repos, email); err != nil {
@@ -185,12 +192,18 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Account, err
 }
 
 // AuthenticateSession 验证会话及其父会话，返回绑定方式及宿主授权所需的真实发起账号。
-func (s *Service) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
+func (s *Service) AuthenticateSession(
+	ctx context.Context,
+	token string,
+) (*AuthenticatedSession, error) {
 	return authenticateSession(ctx, s.store, token, s.now().UTC())
 }
 
 // LoginAs 为可信宿主签发绑定父会话的代登录凭证；宿主负责管理员授权。
-func (s *Service) LoginAs(ctx context.Context, parentToken, accountID string) (*LoginResult, error) {
+func (s *Service) LoginAs(
+	ctx context.Context,
+	parentToken, accountID string,
+) (*LoginResult, error) {
 	var login *LoginResult
 	err := s.store.WithTransaction(ctx, func(repos Repositories) error {
 		var err error
@@ -204,7 +217,10 @@ func (s *Service) LoginAs(ctx context.Context, parentToken, accountID string) (*
 }
 
 // CreatePasswordAccount 由可信宿主创建已准入的密码账号，不创建会话。
-func (s *Service) CreatePasswordAccount(ctx context.Context, input CreatePasswordAccountInput) (*Account, error) {
+func (s *Service) CreatePasswordAccount(
+	ctx context.Context,
+	input CreatePasswordAccountInput,
+) (*Account, error) {
 	var account *Account
 	err := s.store.WithTransaction(ctx, func(repos Repositories) error {
 		var err error
@@ -225,14 +241,21 @@ func (s *Service) SetPassword(ctx context.Context, input SetPasswordInput) error
 }
 
 // LoginPassword 使用密码绑定的用户名或邮箱登录已有密码账号，不自动注册。
-func (s *Service) LoginPassword(ctx context.Context, input PasswordLoginInput) (*LoginResult, error) {
+func (s *Service) LoginPassword(
+	ctx context.Context,
+	input PasswordLoginInput,
+) (*LoginResult, error) {
 	return s.runLogin(ctx, func(tx *Transaction) (Outcome, error) {
 		return tx.LoginPassword(ctx, input)
 	})
 }
 
 // AdminLoginPassword 在创建会话前校验指定管理员，拒绝时提交限流且不留下会话。
-func (s *Service) AdminLoginPassword(ctx context.Context, adminAccountID string, input PasswordLoginInput) (*LoginResult, error) {
+func (s *Service) AdminLoginPassword(
+	ctx context.Context,
+	adminAccountID string,
+	input PasswordLoginInput,
+) (*LoginResult, error) {
 	if !validToken(adminAccountID) {
 		return nil, ErrInvalidInput
 	}

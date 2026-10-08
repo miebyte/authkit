@@ -22,7 +22,10 @@ func (r *accountRepository) GetByID(ctx context.Context, id string) (*authkit.Ac
 }
 
 // GetByPasswordIdentifier 按区分大小写的密码登录标识返回账号。
-func (r *accountRepository) GetByPasswordIdentifier(ctx context.Context, identifier string) (*authkit.Account, error) {
+func (r *accountRepository) GetByPasswordIdentifier(
+	ctx context.Context,
+	identifier string,
+) (*authkit.Account, error) {
 	binding, err := r.findBinding(ctx, authkit.MethodPassword, identifier, false)
 	if err != nil {
 		return nil, err
@@ -34,7 +37,10 @@ func (r *accountRepository) GetByPasswordIdentifier(ctx context.Context, identif
 }
 
 // GetPasswordIdentifier 返回账号绑定的密码登录标识。
-func (r *accountRepository) GetPasswordIdentifier(ctx context.Context, accountID string) (string, error) {
+func (r *accountRepository) GetPasswordIdentifier(
+	ctx context.Context,
+	accountID string,
+) (string, error) {
 	var binding models.Binding
 	if err := r.db.WithContext(ctx).
 		Select("identifier").
@@ -61,7 +67,10 @@ func (r *accountRepository) GetPasswordHash(ctx context.Context, accountID strin
 }
 
 // SetPasswordHash 为已锁定的账号开通或重置密码，已有登录标识不可更改。
-func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+func (r *accountRepository) SetPasswordHash(
+	ctx context.Context,
+	accountID, identifier, hash string,
+) error {
 	if identifier == "" || hash == "" {
 		return authkit.ErrInvalidInput
 	}
@@ -81,7 +90,10 @@ func (r *accountRepository) SetPasswordHash(ctx context.Context, accountID, iden
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// 唯一冲突只返回错误，不能通过 upsert 修改另一账号的密码。
 		return mapError(db.Create(&models.Binding{
-			Method: authkit.MethodPassword, Identifier: identifier, AccountID: &accountID, PasswordHash: &hash,
+			Method:       authkit.MethodPassword,
+			Identifier:   identifier,
+			AccountID:    &accountID,
+			PasswordHash: &hash,
 		}).Error)
 	}
 	if err != nil {

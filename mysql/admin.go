@@ -16,7 +16,10 @@ var _ authkit.AdminRepository = (*Store)(nil)
 // AdminOverview 统计账号、已归属的绑定和父子关系仍有效的未过期会话。
 func (s *Store) AdminOverview(ctx context.Context, now time.Time) (authkit.AdminOverview, error) {
 	var result authkit.AdminOverview
-	if err := s.db.WithContext(ctx).Model(&models.Account{}).Count(&result.Accounts).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Model(&models.Account{}).
+		Count(&result.Accounts).
+		Error; err != nil {
 		return authkit.AdminOverview{}, mapError(err)
 	}
 	if err := s.db.WithContext(ctx).Model(&models.Binding{}).
@@ -46,14 +49,23 @@ func (s *Store) AdminListAccounts(
 	if page < 1 || limit < 1 || page-1 > int(^uint(0)>>1)/limit {
 		return authkit.AdminAccountPage{}, authkit.ErrInvalidInput
 	}
-	result := authkit.AdminAccountPage{Items: []authkit.AdminAccountSummary{}, Page: page, Limit: limit}
+	result := authkit.AdminAccountPage{
+		Items: []authkit.AdminAccountSummary{},
+		Page:  page,
+		Limit: limit,
+	}
 	query := s.db.WithContext(ctx).Model(&models.Account{})
 	if search = strings.TrimSpace(search); search != "" {
 		pattern := "%" + escapeLike(strings.ToLower(search)) + "%"
-		query = query.Where(`auth_accounts.id LIKE ? ESCAPE '!' OR LOWER(auth_accounts.username) LIKE ? ESCAPE '!' OR
+		query = query.Where(
+			`auth_accounts.id LIKE ? ESCAPE '!' OR LOWER(auth_accounts.username) LIKE ? ESCAPE '!' OR
 			EXISTS (SELECT 1 FROM auth_bindings AS b WHERE b.account_id = auth_accounts.id
 			AND b.method = ? AND b.identifier LIKE ? ESCAPE '!')`,
-			pattern, pattern, authkit.MethodEmail, pattern)
+			pattern,
+			pattern,
+			authkit.MethodEmail,
+			pattern,
+		)
 	}
 	if err := query.Count(&result.Total).Error; err != nil {
 		return authkit.AdminAccountPage{}, mapError(err)
@@ -79,7 +91,11 @@ func (s *Store) AdminListAccounts(
 }
 
 // AdminGetAccount 加载账号的凭证和有效会话。
-func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (authkit.AdminAccountDetail, error) {
+func (s *Store) AdminGetAccount(
+	ctx context.Context,
+	id string,
+	now time.Time,
+) (authkit.AdminAccountDetail, error) {
 	if strings.TrimSpace(id) == "" {
 		return authkit.AdminAccountDetail{}, authkit.ErrInvalidInput
 	}
@@ -87,7 +103,11 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 	if err := s.db.WithContext(ctx).Where("id = ?", id).Take(&account).Error; err != nil {
 		return authkit.AdminAccountDetail{}, mapError(err)
 	}
-	result := authkit.AdminAccountDetail{ID: account.ID, Bindings: []authkit.AdminBindingInfo{}, Sessions: []authkit.AdminSessionInfo{}}
+	result := authkit.AdminAccountDetail{
+		ID:       account.ID,
+		Bindings: []authkit.AdminBindingInfo{},
+		Sessions: []authkit.AdminSessionInfo{},
+	}
 	if account.Username != nil {
 		result.Username = *account.Username
 	}
@@ -115,7 +135,10 @@ func (s *Store) AdminGetAccount(ctx context.Context, id string, now time.Time) (
 		return authkit.AdminAccountDetail{}, mapError(err)
 	}
 	for _, session := range sessions {
-		result.Sessions = append(result.Sessions, authkit.AdminSessionInfo{ID: session.Hash, Expires: session.Expires})
+		result.Sessions = append(
+			result.Sessions,
+			authkit.AdminSessionInfo{ID: session.Hash, Expires: session.Expires},
+		)
 	}
 	return result, nil
 }
@@ -140,7 +163,11 @@ func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string
 		var count int64
 		if err := tx.Model(&models.Binding{}).
 			Where("account_id = ? AND (method IN ? OR (method = ? AND password_hash IS NOT NULL))", accountID,
-				[]string{authkit.MethodEmail, authkit.MethodWechat}, authkit.MethodPassword).Count(&count).Error; err != nil {
+				[]string{
+					authkit.MethodEmail,
+					authkit.MethodWechat,
+				}, authkit.MethodPassword).
+			Count(&count).Error; err != nil {
 			return mapError(err)
 		}
 		if count <= 1 {
@@ -155,7 +182,9 @@ func (s *Store) AdminDeleteBinding(ctx context.Context, accountID, method string
 			return authkit.ErrNotFound
 		}
 		if method == authkit.MethodEmail {
-			if err := tx.Where("email = ?", binding.Identifier).Delete(&models.Challenge{}).Error; err != nil {
+			if err := tx.Where("email = ?", binding.Identifier).
+				Delete(&models.Challenge{}).
+				Error; err != nil {
 				return mapError(err)
 			}
 		}

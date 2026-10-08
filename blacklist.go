@@ -29,7 +29,11 @@ func (s *Service) AddBlacklist(ctx context.Context, credential Credential) error
 }
 
 // AdminAddBlacklist 加入黑名单，同时保护指定管理员的登录凭证；调用方必须完成管理鉴权。
-func (s *Service) AdminAddBlacklist(ctx context.Context, credential Credential, protectedAccountID string) error {
+func (s *Service) AdminAddBlacklist(
+	ctx context.Context,
+	credential Credential,
+	protectedAccountID string,
+) error {
 	if !validToken(protectedAccountID) {
 		return ErrInvalidInput
 	}
@@ -37,7 +41,11 @@ func (s *Service) AdminAddBlacklist(ctx context.Context, credential Credential, 
 }
 
 // addBlacklist 规范化输入，并在身份事务内限制凭证。
-func (s *Service) addBlacklist(ctx context.Context, input Credential, protectedAccountID string) error {
+func (s *Service) addBlacklist(
+	ctx context.Context,
+	input Credential,
+	protectedAccountID string,
+) error {
 	credential, err := blacklistCredential(input)
 	if err != nil {
 		return err
@@ -49,7 +57,9 @@ func (s *Service) addBlacklist(ctx context.Context, input Credential, protectedA
 	}
 	return s.store.WithTransaction(ctx, func(repos Repositories) error {
 		if protectedAccountID != "" {
-			if err := repos.Blacklist().Check(ctx, credential); err != nil && !errors.Is(err, ErrBlacklisted) {
+			if err := repos.Blacklist().
+				Check(ctx, credential); err != nil &&
+				!errors.Is(err, ErrBlacklisted) {
 				return err
 			}
 			var account *Account

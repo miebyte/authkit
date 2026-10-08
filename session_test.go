@@ -43,8 +43,14 @@ func TestAuthenticateSessionReturnsLoginMethod(t *testing.T) {
 			} {
 				t.Run(name, func(t *testing.T) {
 					session, err := authenticate(ctx, login.Token)
-					if err != nil || session.Method != method || session.Account.ID != accountID || session.Actor != nil {
-						t.Fatalf("authenticated session = %+v, %v; want method %q", session, err, method)
+					if err != nil || session.Method != method || session.Account.ID != accountID ||
+						session.Actor != nil {
+						t.Fatalf(
+							"authenticated session = %+v, %v; want method %q",
+							session,
+							err,
+							method,
+						)
 					}
 				})
 			}
@@ -101,7 +107,10 @@ func TestLoginAsInheritsParentLoginMethod(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			session, err := authenticate(ctx, child.Token)
-			if err != nil || session.Method != MethodPassword || session.Account.ID != target.Account.ID || session.Actor == nil || session.Actor.ID != parent.Account.ID {
+			if err != nil || session.Method != MethodPassword ||
+				session.Account.ID != target.Account.ID ||
+				session.Actor == nil ||
+				session.Actor.ID != parent.Account.ID {
 				t.Fatalf("derived session = %+v, %v", session, err)
 			}
 		})
@@ -118,11 +127,13 @@ func TestLoginAsUsesRevocableSessionAndReturnsActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !validToken(child.Token) || child.Token == parent.Token || child.Created || child.Account.ID != target.Account.ID {
+	if !validToken(child.Token) || child.Token == parent.Token || child.Created ||
+		child.Account.ID != target.Account.ID {
 		t.Fatalf("invalid derived login: %+v", child)
 	}
 	stored := f.store.sessions[digest(child.Token)]
-	if stored.Hash == child.Token || stored.ParentHash != digest(parent.Token) || stored.AccountID != target.Account.ID {
+	if stored.Hash == child.Token || stored.ParentHash != digest(parent.Token) ||
+		stored.AccountID != target.Account.ID {
 		t.Fatalf("stored session does not contain only token digests: %+v", stored)
 	}
 	if !child.Expires.Equal(parent.Expires) {
@@ -132,7 +143,8 @@ func TestLoginAsUsesRevocableSessionAndReturnsActor(t *testing.T) {
 		t.Fatal("ordinary session TTL changed")
 	}
 	session, err := f.service.AuthenticateSession(ctx, child.Token)
-	if err != nil || session.Account.ID != target.Account.ID || session.Actor == nil || session.Actor.ID != parent.Account.ID {
+	if err != nil || session.Account.ID != target.Account.ID || session.Actor == nil ||
+		session.Actor.ID != parent.Account.ID {
 		t.Fatalf("derived session = %+v, err = %v", session, err)
 	}
 	ordinary, err := f.service.AuthenticateSession(ctx, parent.Token)
@@ -177,7 +189,12 @@ func TestLoginAsRejectsInvalidInputsAndNestedSessions(t *testing.T) {
 			before := len(f.store.sessions)
 			login, err := f.service.LoginAs(ctx, test.token, test.target)
 			if !errors.Is(err, test.want) || login != nil || len(f.store.sessions) != before {
-				t.Fatalf("rejected login = %+v, %v; sessions = %d", login, err, len(f.store.sessions))
+				t.Fatalf(
+					"rejected login = %+v, %v; sessions = %d",
+					login,
+					err,
+					len(f.store.sessions),
+				)
 			}
 		})
 	}
@@ -232,10 +249,18 @@ func TestDerivedSessionFollowsParentAndTargetRevocation(t *testing.T) {
 			if err := test.revoke(f, parent, target); err != nil {
 				t.Fatal(err)
 			}
-			if session, err := f.service.AuthenticateSession(ctx, child.Token); err == nil || session != nil {
+			if session, err := f.service.AuthenticateSession(
+				ctx,
+				child.Token,
+			); err == nil ||
+				session != nil {
 				t.Fatalf("revoked derived session = %+v, %v", session, err)
 			}
-			if account, err := f.service.Authenticate(ctx, child.Token); err == nil || account != nil {
+			if account, err := f.service.Authenticate(
+				ctx,
+				child.Token,
+			); err == nil ||
+				account != nil {
 				t.Fatalf("Authenticate bypassed parent validation: %+v, %v", account, err)
 			}
 		})
@@ -274,25 +299,36 @@ func TestLoginAsWithinHostTransactionRollsBack(t *testing.T) {
 
 func TestLoginAsRejectsExpiredParentAndBlacklistedTarget(t *testing.T) {
 	for _, targetBlocked := range []bool{false, true} {
-		t.Run(map[bool]string{false: "expired parent", true: "blacklisted target"}[targetBlocked], func(t *testing.T) {
-			f := newBlacklistFixture(t)
-			ctx := context.Background()
-			parent := f.loginEmail(t, "admin@example.com")
-			target := f.loginEmail(t, "target@example.com")
-			want := ErrUnauthorized
-			if targetBlocked {
-				if err := f.service.AddBlacklist(ctx, Credential{Method: MethodEmail, Identifier: target.Account.Email}); err != nil {
-					t.Fatal(err)
+		t.Run(
+			map[bool]string{false: "expired parent", true: "blacklisted target"}[targetBlocked],
+			func(t *testing.T) {
+				f := newBlacklistFixture(t)
+				ctx := context.Background()
+				parent := f.loginEmail(t, "admin@example.com")
+				target := f.loginEmail(t, "target@example.com")
+				want := ErrUnauthorized
+				if targetBlocked {
+					if err := f.service.AddBlacklist(
+						ctx,
+						Credential{Method: MethodEmail, Identifier: target.Account.Email},
+					); err != nil {
+						t.Fatal(err)
+					}
+					want = ErrBlacklisted
+				} else {
+					f.now = parent.Expires
 				}
-				want = ErrBlacklisted
-			} else {
-				f.now = parent.Expires
-			}
-			before := len(f.store.sessions)
-			login, err := f.service.LoginAs(ctx, parent.Token, target.Account.ID)
-			if !errors.Is(err, want) || login != nil || len(f.store.sessions) != before {
-				t.Fatalf("invalid login = %+v, %v; sessions = %d", login, err, len(f.store.sessions))
-			}
-		})
+				before := len(f.store.sessions)
+				login, err := f.service.LoginAs(ctx, parent.Token, target.Account.ID)
+				if !errors.Is(err, want) || login != nil || len(f.store.sessions) != before {
+					t.Fatalf(
+						"invalid login = %+v, %v; sessions = %d",
+						login,
+						err,
+						len(f.store.sessions),
+					)
+				}
+			},
+		)
 	}
 }

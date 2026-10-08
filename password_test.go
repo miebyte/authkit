@@ -10,9 +10,12 @@ import (
 func passwordDisplayFixture(t *testing.T) (*blacklistFixture, *Account) {
 	t.Helper()
 	f := newBlacklistFixture(t)
-	account, err := f.service.CreatePasswordAccount(context.Background(), CreatePasswordAccountInput{
-		Username: "alice", Identifier: "alice", Password: "original-password",
-	})
+	account, err := f.service.CreatePasswordAccount(
+		context.Background(),
+		CreatePasswordAccountInput{
+			Username: "alice", Identifier: "alice", Password: "original-password",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +61,13 @@ func TestSetPasswordUsesBindingAfterDisplayNameChange(t *testing.T) {
 	if f.store.accounts[account.ID].Username != "shown-name" {
 		t.Fatal("password reset changed the display name")
 	}
-	if _, err := f.service.Authenticate(context.Background(), login.Token); !errors.Is(err, ErrUnauthorized) {
+	if _, err := f.service.Authenticate(
+		context.Background(),
+		login.Token,
+	); !errors.Is(
+		err,
+		ErrUnauthorized,
+	) {
 		t.Fatalf("old session error = %v", err)
 	}
 	for _, identifier := range []string{"alice"} {
@@ -103,7 +112,9 @@ func TestCreatePasswordAccountSeparatesDisplayNameFromIdentifier(t *testing.T) {
 	ctx := context.Background()
 	for _, identifier := range []string{"alice", "bob"} {
 		account, err := f.service.CreatePasswordAccount(ctx, CreatePasswordAccountInput{
-			Username: "共同展示名 @团队", Identifier: " " + identifier + " ", Password: "original-password",
+			Username:   "共同展示名 @团队",
+			Identifier: " " + identifier + " ",
+			Password:   "original-password",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -156,7 +167,10 @@ func TestSetPasswordUsesExplicitIdentifierForFirstBinding(t *testing.T) {
 	account := f.loginEmail(t, "alice@example.com").Account
 	account.Username = "shown-name"
 	f.store.accounts[account.ID] = account
-	err := f.service.SetPassword(ctx, SetPasswordInput{AccountID: account.ID, Password: "original-password"})
+	err := f.service.SetPassword(
+		ctx,
+		SetPasswordInput{AccountID: account.ID, Password: "original-password"},
+	)
 	requireBlacklistError(t, err, ErrInvalidInput)
 	if err := f.service.SetPassword(ctx, SetPasswordInput{
 		AccountID: account.ID, Identifier: " alice ", Password: "original-password",
@@ -166,7 +180,10 @@ func TestSetPasswordUsesExplicitIdentifierForFirstBinding(t *testing.T) {
 	if f.store.accounts[account.ID].Username != "shown-name" {
 		t.Fatal("first password binding changed the display name")
 	}
-	login, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "original-password"})
+	login, err := f.service.LoginPassword(
+		ctx,
+		PasswordLoginInput{Identifier: "alice", Password: "original-password"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +194,10 @@ func TestSetPasswordUsesExplicitIdentifierForFirstBinding(t *testing.T) {
 	if _, err := f.service.Authenticate(ctx, login.Token); err != nil {
 		t.Fatalf("rejected identifier change revoked a session: %v", err)
 	}
-	if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "original-password"}); err != nil {
+	if _, err := f.service.LoginPassword(
+		ctx,
+		PasswordLoginInput{Identifier: "alice", Password: "original-password"},
+	); err != nil {
 		t.Fatalf("rejected identifier change modified password: %v", err)
 	}
 }
@@ -187,7 +207,10 @@ func TestSetPasswordRechecksInferredIdentifierAfterAccountLock(t *testing.T) {
 		t.Run(replacement, func(t *testing.T) {
 			f, account := passwordDisplayFixture(t)
 			f.store.accountCheckHook = func(accountID string) {
-				delete(f.store.bindings, blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: "alice"}))
+				delete(
+					f.store.bindings,
+					blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: "alice"}),
+				)
 				delete(f.store.passwords, accountID)
 				if replacement != "" {
 					f.store.bindings[blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: replacement})] = accountID

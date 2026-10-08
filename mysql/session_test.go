@@ -17,13 +17,18 @@ func TestAuthenticateSessionPreservesLoginMethod(t *testing.T) {
 	ctx := context.Background()
 	mail := &blacklistMail{}
 	const openID = "session-method-open-id"
-	policy := authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error { return nil })
+	policy := authkit.RegistrationPolicyFunc(
+		func(context.Context, authkit.Registration) error { return nil },
+	)
 	service, err := authkit.NewService(f.store, mail, blacklistWechat{openID: openID}, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	account := authkit.Account{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	if err := f.store.Accounts().Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "alice@example.com"}); err != nil {
+	account := authkit.Account{
+		ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	if err := f.store.Accounts().
+		Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "alice@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SetPassword(ctx, authkit.SetPasswordInput{
@@ -32,18 +37,26 @@ func TestAuthenticateSessionPreservesLoginMethod(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := f.db.Create(&models.Binding{
-		Method: authkit.MethodWechat, Identifier: fmt.Sprintf("%x", sha256.Sum256([]byte(openID))), AccountID: &account.ID,
+		Method:     authkit.MethodWechat,
+		Identifier: fmt.Sprintf("%x", sha256.Sum256([]byte(openID))),
+		AccountID:  &account.ID,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SendCode(ctx, authkit.SendCodeInput{Email: "alice@example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	emailLogin, err := service.LoginEmail(ctx, authkit.EmailLoginInput{Email: "alice@example.com", Code: mail.code})
+	emailLogin, err := service.LoginEmail(
+		ctx,
+		authkit.EmailLoginInput{Email: "alice@example.com", Code: mail.code},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	passwordLogin, err := service.LoginPassword(ctx, authkit.PasswordLoginInput{Identifier: "alice@example.com", Password: "valid-password"})
+	passwordLogin, err := service.LoginPassword(
+		ctx,
+		authkit.PasswordLoginInput{Identifier: "alice@example.com", Password: "valid-password"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,19 +74,28 @@ func TestAuthenticateSessionPreservesLoginMethod(t *testing.T) {
 	} {
 		t.Run(test.method, func(t *testing.T) {
 			if test.login.Account.ID != emailLogin.Account.ID {
-				t.Fatalf("login account = %s, want %s", test.login.Account.ID, emailLogin.Account.ID)
+				t.Fatalf(
+					"login account = %s, want %s",
+					test.login.Account.ID,
+					emailLogin.Account.ID,
+				)
 			}
 			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(test.login.Token)))
 			var stored models.Session
-			if err := f.db.Where("hash = ?", hash).Take(&stored).Error; err != nil || stored.Method != test.method {
+			if err := f.db.Where("hash = ?", hash).
+				Take(&stored).
+				Error; err != nil ||
+				stored.Method != test.method {
 				t.Fatalf("stored session = %+v, %v", stored, err)
 			}
 			info, err := service.AuthenticateSession(ctx, test.login.Token)
-			if err != nil || info.Method != test.method || info.Account.ID != emailLogin.Account.ID {
+			if err != nil || info.Method != test.method ||
+				info.Account.ID != emailLogin.Account.ID {
 				t.Fatalf("service authentication = %+v, %v", info, err)
 			}
 			if err := f.store.WithTransaction(ctx, func(repos authkit.Repositories) error {
-				info, err := service.InTransaction(repos, policy).AuthenticateSession(ctx, test.login.Token)
+				info, err := service.InTransaction(repos, policy).
+					AuthenticateSession(ctx, test.login.Token)
 				if err != nil {
 					return err
 				}
@@ -95,12 +117,18 @@ func TestSessionMethodMigrationPreservesLegacySession(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := authkit.Account{ID: "legacy-account"}
-	if err := f.store.Accounts().Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "legacy@example.com"}); err != nil {
+	if err := f.store.Accounts().
+		Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "legacy@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
-	if err := f.db.Exec("INSERT INTO auth_sessions (hash, account_id, expires) VALUES (?, ?, ?)", hash, account.ID, time.Now().UTC().Add(time.Hour)).Error; err != nil {
+	if err := f.db.Exec(
+		"INSERT INTO auth_sessions (hash, account_id, expires) VALUES (?, ?, ?)",
+		hash,
+		account.ID,
+		time.Now().UTC().Add(time.Hour),
+	).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.AutoMigrate(Models()...); err != nil {
@@ -110,7 +138,14 @@ func TestSessionMethodMigrationPreservesLegacySession(t *testing.T) {
 	if err != nil || stored.Method != "" {
 		t.Fatalf("migrated legacy session = %+v, %v", stored, err)
 	}
-	service, err := authkit.NewService(f.store, nil, nil, authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error { return nil }))
+	service, err := authkit.NewService(
+		f.store,
+		nil,
+		nil,
+		authkit.RegistrationPolicyFunc(
+			func(context.Context, authkit.Registration) error { return nil },
+		),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,19 +158,36 @@ func TestSessionMethodMigrationPreservesLegacySession(t *testing.T) {
 func TestDerivedSessionPersistsParentAndFollowsRevocation(t *testing.T) {
 	f := newMySQLFixture(t)
 	ctx := context.Background()
-	service, err := authkit.NewService(f.store, nil, nil, authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error { return nil }))
+	service, err := authkit.NewService(
+		f.store,
+		nil,
+		nil,
+		authkit.RegistrationPolicyFunc(
+			func(context.Context, authkit.Registration) error { return nil },
+		),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var accounts []*authkit.Account
 	for _, name := range []string{"actor", "target"} {
-		account, err := service.CreatePasswordAccount(ctx, authkit.CreatePasswordAccountInput{Identifier: name, Password: "valid-password"})
+		account, err := service.CreatePasswordAccount(
+			ctx,
+			authkit.CreatePasswordAccountInput{Identifier: name, Password: "valid-password"},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		accounts = append(accounts, account)
 	}
-	parent, err := service.LoginPassword(ctx, authkit.PasswordLoginInput{Identifier: "actor", Password: "valid-password", IP: "192.0.2.1"})
+	parent, err := service.LoginPassword(
+		ctx,
+		authkit.PasswordLoginInput{
+			Identifier: "actor",
+			Password:   "valid-password",
+			IP:         "192.0.2.1",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +195,16 @@ func TestDerivedSessionPersistsParentAndFollowsRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := f.store.Sessions().Get(ctx, fmt.Sprintf("%x", sha256.Sum256([]byte(child.Token))))
-	if err != nil || stored.ParentHash != fmt.Sprintf("%x", sha256.Sum256([]byte(parent.Token))) || stored.Method != authkit.MethodPassword {
+	stored, err := f.store.Sessions().
+		Get(ctx, fmt.Sprintf("%x", sha256.Sum256([]byte(child.Token))))
+	if err != nil || stored.ParentHash != fmt.Sprintf("%x", sha256.Sum256([]byte(parent.Token))) ||
+		stored.Method != authkit.MethodPassword {
 		t.Fatalf("stored derived session = %+v, %v", stored, err)
 	}
 	info, err := service.AuthenticateSession(ctx, child.Token)
-	if err != nil || info.Actor == nil || info.Actor.ID != accounts[0].ID || info.Account.ID != accounts[1].ID || info.Method != authkit.MethodPassword {
+	if err != nil || info.Actor == nil || info.Actor.ID != accounts[0].ID ||
+		info.Account.ID != accounts[1].ID ||
+		info.Method != authkit.MethodPassword {
 		t.Fatalf("derived authentication = %+v, %v", info, err)
 	}
 	before, err := service.AdminOverview(ctx)
@@ -168,10 +224,12 @@ func TestDerivedSessionsExcludedFromAdminViewsAfterParentLogout(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	account := authkit.Account{ID: "target"}
-	if err := f.store.Accounts().Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "target@example.com"}); err != nil {
+	if err := f.store.Accounts().
+		Create(ctx, &account, authkit.Credential{Method: authkit.MethodEmail, Identifier: "target@example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.Sessions().Create(ctx, &authkit.Session{Hash: "child", AccountID: account.ID, Expires: now.Add(time.Hour), ParentHash: "missing-parent"}); err != nil {
+	if err := f.store.Sessions().
+		Create(ctx, &authkit.Session{Hash: "child", AccountID: account.ID, Expires: now.Add(time.Hour), ParentHash: "missing-parent"}); err != nil {
 		t.Fatal(err)
 	}
 	overview, err := f.store.AdminOverview(ctx, now)

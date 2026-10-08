@@ -35,7 +35,8 @@ func TestPasswordAlgorithmConfiguration(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := configuredPasswordFixture(t, test.configs...)
-			if f.service.passwordAlgorithm != test.want || f.service.InTransaction(f.store, f.policy).passwordAlgorithm != test.want {
+			if f.service.passwordAlgorithm != test.want ||
+				f.service.InTransaction(f.store, f.policy).passwordAlgorithm != test.want {
 				t.Fatal("服务和宿主事务没有使用配置的密码算法")
 			}
 		})
@@ -47,7 +48,13 @@ func TestPasswordAlgorithmConfiguration(t *testing.T) {
 		{{}, {}},
 		{{PasswordAlgorithm: PasswordAlgorithmBcrypt}, {PasswordAlgorithm: PasswordAlgorithmBcrypt}},
 	} {
-		if service, err := NewService(f.store, nil, nil, nil, configs...); !errors.Is(err, ErrInvalidInput) || service != nil {
+		if service, err := NewService(
+			f.store,
+			nil,
+			nil,
+			nil,
+			configs...); !errors.Is(err, ErrInvalidInput) ||
+			service != nil {
 			t.Fatal("未知算法或多个配置不应创建服务")
 		}
 	}
@@ -66,29 +73,49 @@ func TestSelectedPasswordAlgorithmCreateLoginAndReset(t *testing.T) {
 			}
 			original := f.store.passwords[account.ID]
 			assertSelectedPasswordHash(t, algorithm, original)
-			outcome, err := f.service.InTransaction(f.store, f.policy).LoginPassword(ctx, PasswordLoginInput{
-				Identifier: "alice", Password: "original-password",
-			})
-			if err != nil || outcome.Rejected != nil || outcome.Login == nil || outcome.Login.Account.ID != account.ID {
+			outcome, err := f.service.InTransaction(f.store, f.policy).
+				LoginPassword(ctx, PasswordLoginInput{
+					Identifier: "alice", Password: "original-password",
+				})
+			if err != nil || outcome.Rejected != nil || outcome.Login == nil ||
+				outcome.Login.Account.ID != account.ID {
 				t.Fatal("宿主事务没有使用所选算法登录")
 			}
 			if f.store.passwords[account.ID] != original {
 				t.Fatal("登录不应改写密码摘要")
 			}
-			if err := f.service.SetPassword(ctx, SetPasswordInput{AccountID: account.ID, Password: "replacement-password"}); err != nil {
+			if err := f.service.SetPassword(
+				ctx,
+				SetPasswordInput{AccountID: account.ID, Password: "replacement-password"},
+			); err != nil {
 				t.Fatal(err)
 			}
 			assertSelectedPasswordHash(t, algorithm, f.store.passwords[account.ID])
 			if f.store.passwords[account.ID] == original {
 				t.Fatal("重设密码没有生成新摘要")
 			}
-			if _, err := f.service.Authenticate(ctx, outcome.Login.Token); !errors.Is(err, ErrUnauthorized) {
+			if _, err := f.service.Authenticate(
+				ctx,
+				outcome.Login.Token,
+			); !errors.Is(
+				err,
+				ErrUnauthorized,
+			) {
 				t.Fatal("重设密码未撤销旧会话")
 			}
-			if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "original-password"}); !errors.Is(err, ErrInvalidCredentials) {
+			if _, err := f.service.LoginPassword(
+				ctx,
+				PasswordLoginInput{Identifier: "alice", Password: "original-password"},
+			); !errors.Is(
+				err,
+				ErrInvalidCredentials,
+			) {
 				t.Fatal("重设后仍接受原密码")
 			}
-			if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "replacement-password"}); err != nil {
+			if _, err := f.service.LoginPassword(
+				ctx,
+				PasswordLoginInput{Identifier: "alice", Password: "replacement-password"},
+			); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -100,7 +127,10 @@ func TestSelectedPasswordAlgorithmRejectsOtherAlgorithm(t *testing.T) {
 		t.Run(string(algorithm), func(t *testing.T) {
 			f := configuredPasswordFixture(t, Config{PasswordAlgorithm: algorithm})
 			ctx := context.Background()
-			account, err := f.service.CreatePasswordAccount(ctx, CreatePasswordAccountInput{Identifier: "alice", Password: "original-password"})
+			account, err := f.service.CreatePasswordAccount(
+				ctx,
+				CreatePasswordAccountInput{Identifier: "alice", Password: "original-password"},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,21 +139,43 @@ func TestSelectedPasswordAlgorithmRejectsOtherAlgorithm(t *testing.T) {
 			if algorithm == PasswordAlgorithmBcrypt {
 				other = PasswordAlgorithmArgon2id
 			}
-			otherService, err := NewService(f.store, nil, nil, f.policy, Config{PasswordAlgorithm: other})
+			otherService, err := NewService(
+				f.store,
+				nil,
+				nil,
+				f.policy,
+				Config{PasswordAlgorithm: other},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
 			otherService.now = f.service.now
-			if _, err := otherService.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "original-password"}); !errors.Is(err, ErrInvalidCredentials) {
+			if _, err := otherService.LoginPassword(
+				ctx,
+				PasswordLoginInput{Identifier: "alice", Password: "original-password"},
+			); !errors.Is(
+				err,
+				ErrInvalidCredentials,
+			) {
 				t.Fatal("不应自动回退验证另一种算法")
 			}
-			if len(f.store.sessions) != 0 || f.store.passwords[account.ID] != original || f.store.rates[digest("password-account:"+account.ID)].Hits != 1 {
+			if len(f.store.sessions) != 0 || f.store.passwords[account.ID] != original ||
+				f.store.rates[digest("password-account:"+account.ID)].Hits != 1 {
 				t.Fatal("算法不匹配应保留限流计数，且不得签发会话或改摘要")
 			}
-			if err := f.service.AddBlacklist(ctx, Credential{Method: MethodPassword, Identifier: "alice"}); err != nil {
+			if err := f.service.AddBlacklist(
+				ctx,
+				Credential{Method: MethodPassword, Identifier: "alice"},
+			); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := otherService.LoginPassword(ctx, PasswordLoginInput{Identifier: "alice", Password: "original-password"}); !errors.Is(err, ErrBlacklisted) {
+			if _, err := otherService.LoginPassword(
+				ctx,
+				PasswordLoginInput{Identifier: "alice", Password: "original-password"},
+			); !errors.Is(
+				err,
+				ErrBlacklisted,
+			) {
 				t.Fatal("算法选择不能绕过账号黑名单")
 			}
 		})
@@ -134,15 +186,30 @@ func TestBcryptInputAndLegacyPasswordPolicy(t *testing.T) {
 	f := configuredPasswordFixture(t, Config{PasswordAlgorithm: PasswordAlgorithmBcrypt})
 	ctx := context.Background()
 	for _, password := range []string{"old123", strings.Repeat("x", 73), strings.Repeat("界", 25)} {
-		if _, err := f.service.CreatePasswordAccount(ctx, CreatePasswordAccountInput{Identifier: "invalid", Password: password}); !errors.Is(err, ErrInvalidInput) {
+		if _, err := f.service.CreatePasswordAccount(
+			ctx,
+			CreatePasswordAccountInput{Identifier: "invalid", Password: password},
+		); !errors.Is(
+			err,
+			ErrInvalidInput,
+		) {
 			t.Fatal("bcrypt 新账号应拒绝短密码和超过 72 字节的密码")
 		}
 	}
-	account, err := f.service.CreatePasswordAccount(ctx, CreatePasswordAccountInput{Identifier: "legacy", Password: strings.Repeat("界", 24)})
+	account, err := f.service.CreatePasswordAccount(
+		ctx,
+		CreatePasswordAccountInput{Identifier: "legacy", Password: strings.Repeat("界", 24)},
+	)
 	if err != nil {
 		t.Fatal("bcrypt 应接受 72 字节的 Unicode 密码")
 	}
-	if err := f.service.SetPassword(ctx, SetPasswordInput{AccountID: account.ID, Password: "old123"}); !errors.Is(err, ErrInvalidInput) {
+	if err := f.service.SetPassword(
+		ctx,
+		SetPasswordInput{AccountID: account.ID, Password: "old123"},
+	); !errors.Is(
+		err,
+		ErrInvalidInput,
+	) {
 		t.Fatal("bcrypt 重设密码仍应要求至少 8 字符")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte("old123"), bcrypt.MinCost)
@@ -150,7 +217,10 @@ func TestBcryptInputAndLegacyPasswordPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.store.passwords[account.ID] = string(hash)
-	if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "legacy", Password: "old123"}); err != nil {
+	if _, err := f.service.LoginPassword(
+		ctx,
+		PasswordLoginInput{Identifier: "legacy", Password: "old123"},
+	); err != nil {
 		t.Fatal("bcrypt 应直接验证已有 6 字符密码")
 	}
 	if f.store.passwords[account.ID] != string(hash) {
@@ -168,14 +238,35 @@ func TestSelectedPasswordDummyAndRejection(t *testing.T) {
 			f := configuredPasswordFixture(t, Config{PasswordAlgorithm: algorithm})
 			ctx := context.Background()
 			f.store.bind(strings.Repeat("a", 64), "no-password@example.com", "")
-			f.store.bindings[blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: "no-password@example.com"})] = strings.Repeat("a", 64)
+			f.store.bindings[blacklistCredentialKey(Credential{Method: MethodPassword, Identifier: "no-password@example.com"})] = strings.Repeat(
+				"a",
+				64,
+			)
 			for _, identifier := range []string{"unknown", "no-password@example.com"} {
-				if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: identifier, Password: "incorrect-password"}); !errors.Is(err, ErrInvalidCredentials) {
+				if _, err := f.service.LoginPassword(
+					ctx,
+					PasswordLoginInput{Identifier: identifier, Password: "incorrect-password"},
+				); !errors.Is(
+					err,
+					ErrInvalidCredentials,
+				) {
 					t.Fatal("未知或未设密账号应按所选算法执行占位后拒绝")
 				}
 			}
-			f.store.rates[digest("password-account:"+strings.Repeat("a", 64))] = blacklistRate{Starts: f.now, Hits: PasswordAccountRateLimit}
-			if _, err := f.service.LoginPassword(ctx, PasswordLoginInput{Identifier: "no-password@example.com", Password: "incorrect-password"}); !errors.Is(err, ErrTooManyRequests) {
+			f.store.rates[digest("password-account:"+strings.Repeat("a", 64))] = blacklistRate{
+				Starts: f.now,
+				Hits:   PasswordAccountRateLimit,
+			}
+			if _, err := f.service.LoginPassword(
+				ctx,
+				PasswordLoginInput{
+					Identifier: "no-password@example.com",
+					Password:   "incorrect-password",
+				},
+			); !errors.Is(
+				err,
+				ErrTooManyRequests,
+			) {
 				t.Fatal("所选算法的占位拒绝不能绕过限流")
 			}
 		})

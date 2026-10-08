@@ -47,7 +47,8 @@ func (t *Transaction) loginCode(ctx context.Context, input codeLogin) (Outcome, 
 	if !validCode(input.code) {
 		return Outcome{}, ErrInvalidInput
 	}
-	if err := t.repos.Blacklist().Check(ctx, Credential{Method: input.method, Identifier: input.target}); err != nil {
+	if err := t.repos.Blacklist().
+		Check(ctx, Credential{Method: input.method, Identifier: input.target}); err != nil {
 		return Outcome{}, err
 	}
 	// 先锁账号再锁验证码，与后台解绑及拉黑操作保持相同顺序。
@@ -122,7 +123,8 @@ func (t *Transaction) LoginWechat(
 	}
 	now := t.now().UTC()
 	openIDHash := digest(subject.OpenID)
-	if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodWechat, Identifier: openIDHash}); err != nil {
+	if err := t.repos.Blacklist().
+		Check(ctx, Credential{Method: MethodWechat, Identifier: openIDHash}); err != nil {
 		return Outcome{}, err
 	}
 	user, err := t.repos.Accounts().GetByWechat(ctx, openIDHash)
@@ -194,9 +196,13 @@ func (t *Transaction) createAccount(
 }
 
 // CreatePasswordAccount 在宿主事务内创建密码账号，返回值须在提交后使用。
-func (t *Transaction) CreatePasswordAccount(ctx context.Context, input CreatePasswordAccountInput) (*Account, error) {
+func (t *Transaction) CreatePasswordAccount(
+	ctx context.Context,
+	input CreatePasswordAccountInput,
+) (*Account, error) {
 	identifier, err := NormalizeUsername(input.Identifier)
-	if err != nil || !t.passwordAlgorithm.validPassword(input.Password, 8) || !validDisplayName(input.Username) {
+	if err != nil || !t.passwordAlgorithm.validPassword(input.Password, 8) ||
+		!validDisplayName(input.Username) {
 		return nil, ErrInvalidInput
 	}
 
@@ -299,11 +305,15 @@ func (t *Transaction) SetPassword(ctx context.Context, input SetPasswordInput) e
 }
 
 // checkPasswordEmailOwner 与邮箱注册共用凭证锁，拒绝把同邮箱的两种登录方式分配给不同账号。
-func (t *Transaction) checkPasswordEmailOwner(ctx context.Context, identifier, accountID string) error {
+func (t *Transaction) checkPasswordEmailOwner(
+	ctx context.Context,
+	identifier, accountID string,
+) error {
 	if !strings.Contains(identifier, "@") {
 		return nil
 	}
-	if err := t.repos.Blacklist().Check(ctx, Credential{Method: MethodEmail, Identifier: identifier}); err != nil {
+	if err := t.repos.Blacklist().
+		Check(ctx, Credential{Method: MethodEmail, Identifier: identifier}); err != nil {
 		return err
 	}
 	account, err := t.repos.Accounts().GetByEmail(ctx, identifier)
@@ -320,12 +330,19 @@ func (t *Transaction) checkPasswordEmailOwner(ctx context.Context, identifier, a
 }
 
 // LoginPassword 在宿主事务内验证密码；Rejected 必须提交以保留尝试次数。
-func (t *Transaction) LoginPassword(ctx context.Context, input PasswordLoginInput) (Outcome, error) {
+func (t *Transaction) LoginPassword(
+	ctx context.Context,
+	input PasswordLoginInput,
+) (Outcome, error) {
 	return t.loginPassword(ctx, input, "")
 }
 
 // loginPassword 在账号锁内读取并验证当前密码，再创建允许交付的会话。
-func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInput, requiredAccountID string) (Outcome, error) {
+func (t *Transaction) loginPassword(
+	ctx context.Context,
+	input PasswordLoginInput,
+	requiredAccountID string,
+) (Outcome, error) {
 	if !validPassword(input.Password, 1) || len(input.IP) > 512 {
 		return Outcome{}, ErrInvalidInput
 	}
@@ -344,7 +361,8 @@ func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInpu
 		rateKey = "password-account:" + account.ID
 	}
 	now := t.now().UTC()
-	if err := t.repos.Rates().Hit(ctx, digest("password-ip:"+input.IP), now, PasswordIPRateLimit); err != nil {
+	if err := t.repos.Rates().
+		Hit(ctx, digest("password-ip:"+input.IP), now, PasswordIPRateLimit); err != nil {
 		return passwordRejection(err)
 	}
 	if err := t.repos.Rates().Hit(ctx, digest(rateKey), now, PasswordAccountRateLimit); err != nil {
@@ -383,7 +401,8 @@ func (t *Transaction) loginPassword(ctx context.Context, input PasswordLoginInpu
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !t.passwordAlgorithm.verifyPassword(input.Password, hash) || requiredAccountID != "" && account.ID != requiredAccountID {
+	if !t.passwordAlgorithm.verifyPassword(input.Password, hash) ||
+		requiredAccountID != "" && account.ID != requiredAccountID {
 		return Outcome{Rejected: ErrInvalidCredentials}, nil
 	}
 	return t.finishLogin(ctx, account, MethodPassword, nil, false, now)
@@ -412,13 +431,25 @@ func (t *Transaction) finishLogin(
 }
 
 // createSession 为普通登录和代登录统一生成令牌并持久化摘要及绑定方式。
-func (t *Transaction) createSession(ctx context.Context, account *Account, method, parentHash string, expires time.Time, created bool) (*LoginResult, error) {
+func (t *Transaction) createSession(
+	ctx context.Context,
+	account *Account,
+	method, parentHash string,
+	expires time.Time,
+	created bool,
+) (*LoginResult, error) {
 	token, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	if err := t.repos.Sessions().Create(ctx, &Session{
-		Hash: digest(token), AccountID: account.ID, Method: method, Expires: expires, ParentHash: parentHash,
+		Hash: digest(
+			token,
+		),
+		AccountID:  account.ID,
+		Method:     method,
+		Expires:    expires,
+		ParentHash: parentHash,
 	}); err != nil {
 		return nil, err
 	}
@@ -426,13 +457,19 @@ func (t *Transaction) createSession(ctx context.Context, account *Account, metho
 }
 
 // AuthenticateSession 在宿主事务内验证会话及其父会话，返回绑定方式及宿主授权所需的账号。
-func (t *Transaction) AuthenticateSession(ctx context.Context, token string) (*AuthenticatedSession, error) {
+func (t *Transaction) AuthenticateSession(
+	ctx context.Context,
+	token string,
+) (*AuthenticatedSession, error) {
 	return authenticateSession(ctx, t.repos, token, t.now().UTC())
 }
 
 // LoginAs 在宿主事务内签发代登录会话；调用前须由宿主完成管理员授权。
 // 派生会话不能再次派生，且期限不能超过父会话；调用后授权失败须回滚事务。
-func (t *Transaction) LoginAs(ctx context.Context, parentToken, accountID string) (*LoginResult, error) {
+func (t *Transaction) LoginAs(
+	ctx context.Context,
+	parentToken, accountID string,
+) (*LoginResult, error) {
 	if !validToken(accountID) {
 		return nil, ErrInvalidInput
 	}
@@ -459,7 +496,12 @@ func (t *Transaction) LoginAs(ctx context.Context, parentToken, accountID string
 }
 
 // authenticateSession 对格式错误的凭证跳过数据库查询，并限制父子关系只有一层。
-func authenticateSession(ctx context.Context, repos Repositories, token string, now time.Time) (*AuthenticatedSession, error) {
+func authenticateSession(
+	ctx context.Context,
+	repos Repositories,
+	token string,
+	now time.Time,
+) (*AuthenticatedSession, error) {
 	if !validToken(token) {
 		return nil, ErrUnauthorized
 	}
@@ -467,7 +509,11 @@ func authenticateSession(ctx context.Context, repos Repositories, token string, 
 	if err != nil {
 		return nil, err
 	}
-	result := &AuthenticatedSession{Account: *account, Method: session.Method, Expires: session.Expires}
+	result := &AuthenticatedSession{
+		Account: *account,
+		Method:  session.Method,
+		Expires: session.Expires,
+	}
 	if session.ParentHash != "" {
 		parent, actor, err := activeSession(ctx, repos, session.ParentHash, now)
 		if err != nil {
@@ -485,7 +531,12 @@ func authenticateSession(ctx context.Context, repos Repositories, token string, 
 }
 
 // activeSession 校验摘要对应会话、账号和账号黑名单。
-func activeSession(ctx context.Context, repos Repositories, hash string, now time.Time) (*Session, *Account, error) {
+func activeSession(
+	ctx context.Context,
+	repos Repositories,
+	hash string,
+	now time.Time,
+) (*Session, *Account, error) {
 	session, err := repos.Sessions().Get(ctx, hash)
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil, ErrUnauthorized

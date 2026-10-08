@@ -129,7 +129,8 @@ func CreatePasswordAccount(
 			},
 		)
 		var err error
-		account, err = service.InTransaction(authmysql.Bind(tx), policy).CreatePasswordAccount(ctx, input)
+		account, err = service.InTransaction(authmysql.Bind(tx), policy).
+			CreatePasswordAccount(ctx, input)
 		return err
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {

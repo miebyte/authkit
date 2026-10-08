@@ -78,10 +78,16 @@ func (f *handlerFixture) request(method, path, body, token string) *httptest.Res
 
 func (f *handlerFixture) login(t *testing.T, email string) string {
 	t.Helper()
-	if err := f.service.SendCode(context.Background(), authkit.SendCodeInput{Email: email, IP: "192.0.2.1"}); err != nil {
+	if err := f.service.SendCode(
+		context.Background(),
+		authkit.SendCodeInput{Email: email, IP: "192.0.2.1"},
+	); err != nil {
 		t.Fatal(err)
 	}
-	result, err := f.service.LoginEmail(context.Background(), authkit.EmailLoginInput{Email: email, Code: f.mail.lastCode})
+	result, err := f.service.LoginEmail(
+		context.Background(),
+		authkit.EmailLoginInput{Email: email, Code: f.mail.lastCode},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +129,10 @@ func assertConsoleResources(t *testing.T, mux *http.ServeMux, pagePath string) {
 			continue
 		}
 		resource := httptest.NewRecorder()
-		mux.ServeHTTP(resource, httptest.NewRequest(http.MethodGet, pageURL.ResolveReference(ref).RequestURI(), nil))
+		mux.ServeHTTP(
+			resource,
+			httptest.NewRequest(http.MethodGet, pageURL.ResolveReference(ref).RequestURI(), nil),
+		)
 		requireStatus(t, resource, http.StatusOK)
 		if resource.Body.Len() == 0 || resource.Header().Get("Content-Type") == "" {
 			t.Fatalf("embedded resource %q is empty or missing its content type", match[1])
@@ -173,7 +182,10 @@ func TestConsoleCustomTitle(t *testing.T) {
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		requireStatus(t, response, http.StatusOK)
 		body := response.Body.String()
-		if !strings.Contains(body, `<meta name="authkit-title" content="`+html.EscapeString(title)+`">`) {
+		if !strings.Contains(
+			body,
+			`<meta name="authkit-title" content="`+html.EscapeString(title)+`">`,
+		) {
 			t.Fatalf("%s does not expose escaped custom title", path)
 		}
 		if !strings.Contains(body, "<title>"+html.EscapeString(title)+" 超管后台</title>") {
@@ -194,7 +206,15 @@ func TestConsoleEmptyTitleUsesDefault(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `<meta name="authkit-title" content="AuthKit">`) {
 		t.Fatal("blank title did not use the default")
 	}
-	if _, err := NewHTTPHandler(f.service, testAdminID, Config{}, Config{}); !errors.Is(err, authkit.ErrInvalidInput) {
+	if _, err := NewHTTPHandler(
+		f.service,
+		testAdminID,
+		Config{},
+		Config{},
+	); !errors.Is(
+		err,
+		authkit.ErrInvalidInput,
+	) {
 		t.Fatalf("multiple title configurations = %v", err)
 	}
 }
@@ -256,14 +276,25 @@ func TestAdminAPIRequiresConfiguredAccount(t *testing.T) {
 		{http.MethodPost, "/authkit/admin/api/blacklist"},
 		{http.MethodDelete, "/authkit/admin/api/blacklist/" + testUserID},
 		{http.MethodDelete, "/authkit/admin/api/accounts/" + testUserID + "/bindings/email"},
-		{http.MethodDelete, "/authkit/admin/api/accounts/" + testUserID + "/sessions/" + testUserID},
+		{
+			http.MethodDelete,
+			"/authkit/admin/api/accounts/" + testUserID + "/sessions/" + testUserID,
+		},
 		{http.MethodPost, "/authkit/admin/api/accounts/" + testUserID + "/sessions/revoke"},
 		{http.MethodPost, "/authkit/admin/api/logout"},
 	}
 	for _, request := range requests {
 		t.Run(request.method+" "+request.path, func(t *testing.T) {
-			requireStatus(t, f.request(request.method, request.path, "", ""), http.StatusUnauthorized)
-			requireStatus(t, f.request(request.method, request.path, "", ordinaryToken), http.StatusForbidden)
+			requireStatus(
+				t,
+				f.request(request.method, request.path, "", ""),
+				http.StatusUnauthorized,
+			)
+			requireStatus(
+				t,
+				f.request(request.method, request.path, "", ordinaryToken),
+				http.StatusForbidden,
+			)
 		})
 	}
 }
@@ -271,17 +302,32 @@ func TestAdminAPIRequiresConfiguredAccount(t *testing.T) {
 func TestAdminCodeAndLoginUseExistingAccount(t *testing.T) {
 	f := newHandlerFixture(t)
 	for _, email := range []string{"user@example.com", "missing@example.com"} {
-		response := f.request(http.MethodPost, "/authkit/admin/api/codes", `{"email":"`+email+`"}`, "")
+		response := f.request(
+			http.MethodPost,
+			"/authkit/admin/api/codes",
+			`{"email":"`+email+`"}`,
+			"",
+		)
 		requireStatus(t, response, http.StatusNoContent)
 		if f.mail.sent != 0 {
 			t.Fatalf("sent %d codes to non-admin mailboxes", f.mail.sent)
 		}
 	}
 
-	response := f.request(http.MethodPost, "/authkit/admin/api/codes", `{"email":" ADMIN@Example.com "}`, "")
+	response := f.request(
+		http.MethodPost,
+		"/authkit/admin/api/codes",
+		`{"email":" ADMIN@Example.com "}`,
+		"",
+	)
 	requireStatus(t, response, http.StatusNoContent)
 	if f.mail.sent != 1 || f.mail.lastEmail != "admin@example.com" || len(f.mail.lastCode) != 6 {
-		t.Fatalf("unexpected code delivery: sent=%d email=%q code length=%d", f.mail.sent, f.mail.lastEmail, len(f.mail.lastCode))
+		t.Fatalf(
+			"unexpected code delivery: sent=%d email=%q code length=%d",
+			f.mail.sent,
+			f.mail.lastEmail,
+			len(f.mail.lastCode),
+		)
 	}
 
 	response = f.request(http.MethodPost, "/authkit/admin/api/login",
@@ -297,11 +343,19 @@ func TestAdminCodeAndLoginUseExistingAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if login.Token == "" || login.Account.ID != testAdminID {
-		t.Fatalf("unexpected login response: account=%q token length=%d", login.Account.ID, len(login.Token))
+		t.Fatalf(
+			"unexpected login response: account=%q token length=%d",
+			login.Account.ID,
+			len(login.Token),
+		)
 	}
 	account, err := f.service.Authenticate(context.Background(), login.Token)
 	if err != nil || account.ID != testAdminID {
-		t.Fatalf("authkit token did not authenticate the configured account: account=%v err=%v", account, err)
+		t.Fatalf(
+			"authkit token did not authenticate the configured account: account=%v err=%v",
+			account,
+			err,
+		)
 	}
 
 	for _, path := range []string{
@@ -312,8 +366,16 @@ func TestAdminCodeAndLoginUseExistingAccount(t *testing.T) {
 	} {
 		requireStatus(t, f.request(http.MethodGet, path, "", login.Token), http.StatusOK)
 	}
-	requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/logout", "", login.Token), http.StatusNoContent)
-	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", login.Token), http.StatusUnauthorized)
+	requireStatus(
+		t,
+		f.request(http.MethodPost, "/authkit/admin/api/logout", "", login.Token),
+		http.StatusNoContent,
+	)
+	requireStatus(
+		t,
+		f.request(http.MethodGet, "/authkit/admin/api/me", "", login.Token),
+		http.StatusUnauthorized,
+	)
 }
 
 func TestOrdinaryAccountCannotLoginToConsole(t *testing.T) {
@@ -353,11 +415,18 @@ func TestAdminPasswordLoginUsesConfiguredAccount(t *testing.T) {
 	f := newHandlerFixture(t)
 	f.setPassword(t, testAdminID, "admin@example.com")
 	for _, identifier := range []string{" admin@example.com ", " ADMIN@Example.com "} {
-		body, err := json.Marshal(passwordLoginRequest{Identifier: identifier, Password: "test-password-123"})
+		body, err := json.Marshal(
+			passwordLoginRequest{Identifier: identifier, Password: "test-password-123"},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		response := f.request(http.MethodPost, "/authkit/admin/api/password/login", string(body), "")
+		response := f.request(
+			http.MethodPost,
+			"/authkit/admin/api/password/login",
+			string(body),
+			"",
+		)
 		requireStatus(t, response, http.StatusOK)
 		var result struct {
 			Token   string          `json:"token"`
@@ -366,18 +435,30 @@ func TestAdminPasswordLoginUsesConfiguredAccount(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.Account.ID != testAdminID || result.Account.Username != "admin@example.com" || result.Token == "" {
+		if result.Account.ID != testAdminID || result.Account.Username != "admin@example.com" ||
+			result.Token == "" {
 			t.Fatalf("unexpected password login result: %+v", result.Account)
 		}
 		if strings.Contains(response.Body.String(), f.auth.passwords[testAdminID]) {
 			t.Fatal("password login exposed the stored hash")
 		}
-		requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", result.Token), http.StatusOK)
-		requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/logout", "", result.Token), http.StatusNoContent)
+		requireStatus(
+			t,
+			f.request(http.MethodGet, "/authkit/admin/api/me", "", result.Token),
+			http.StatusOK,
+		)
+		requireStatus(
+			t,
+			f.request(http.MethodPost, "/authkit/admin/api/logout", "", result.Token),
+			http.StatusNoContent,
+		)
 	}
 	ipKey := fmt.Sprintf("%x", sha256.Sum256([]byte("password-ip:192.0.2.1")))
 	if f.auth.rateHits[ipKey] != 2 {
-		t.Fatalf("password logins counted %d attempts for the connection IP", f.auth.rateHits[ipKey])
+		t.Fatalf(
+			"password logins counted %d attempts for the connection IP",
+			f.auth.rateHits[ipKey],
+		)
 	}
 }
 
@@ -410,7 +491,8 @@ func TestAdminPasswordLoginIgnoresDisplayName(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.Account.ID != testAdminID || result.Account.Username != "管理员" || result.Token == "" {
+		if result.Account.ID != testAdminID || result.Account.Username != "管理员" ||
+			result.Token == "" {
 			t.Fatalf("renamed account login result = %+v", result.Account)
 		}
 	}
@@ -465,7 +547,11 @@ func TestAdminPasswordRejectsBadJSONBeforeStorage(t *testing.T) {
 		`{"identifier":"admin","password":"secret"} {}`,
 		`{"identifier":true,"password":"secret"}`,
 	} {
-		requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/password/login", body, ""), http.StatusBadRequest)
+		requireStatus(
+			t,
+			f.request(http.MethodPost, "/authkit/admin/api/password/login", body, ""),
+			http.StatusBadRequest,
+		)
 	}
 	if len(f.auth.rateHits) != 0 || len(f.auth.sessions) != 0 {
 		t.Fatal("invalid password JSON reached the login storage")
@@ -485,7 +571,8 @@ func TestAdminDisplaysAndDeletesPasswordBinding(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &account); err != nil {
 		t.Fatal(err)
 	}
-	if len(account.Bindings) != 2 || account.Bindings[1].Method != authkit.MethodPassword || account.Bindings[1].Identifier != "user" {
+	if len(account.Bindings) != 2 || account.Bindings[1].Method != authkit.MethodPassword ||
+		account.Bindings[1].Identifier != "user" {
 		t.Fatalf("password binding projection = %+v", account.Bindings)
 	}
 	if account.Username != "用户" {
@@ -494,9 +581,14 @@ func TestAdminDisplaysAndDeletesPasswordBinding(t *testing.T) {
 	if strings.Contains(response.Body.String(), f.auth.passwords[testUserID]) {
 		t.Fatal("account detail exposed a password hash")
 	}
-	requireStatus(t, f.request(http.MethodDelete,
-		"/authkit/admin/api/accounts/"+testUserID+"/bindings/password", "", token), http.StatusNoContent)
-	if f.auth.deletedBinding != testUserID+"/password" || f.auth.passwords[testUserID] != "" || f.auth.passwordIdentifiers[testUserID] != "" {
+	requireStatus(t, f.request(
+		http.MethodDelete,
+		"/authkit/admin/api/accounts/"+testUserID+"/bindings/password",
+		"",
+		token,
+	), http.StatusNoContent)
+	if f.auth.deletedBinding != testUserID+"/password" || f.auth.passwords[testUserID] != "" ||
+		f.auth.passwordIdentifiers[testUserID] != "" {
 		t.Fatal("handler did not remove the requested password credential")
 	}
 	if f.auth.accounts[testUserID].Username != "用户" {
@@ -520,18 +612,30 @@ func TestAdminCannotRemoveOwnBinding(t *testing.T) {
 func TestAdminActionsTargetRequestedAccount(t *testing.T) {
 	f := newHandlerFixture(t)
 	token := f.login(t, "admin@example.com")
-	requireStatus(t, f.request(http.MethodDelete,
-		"/authkit/admin/api/accounts/"+testUserID+"/bindings/email", "", token), http.StatusNoContent)
+	requireStatus(t, f.request(
+		http.MethodDelete,
+		"/authkit/admin/api/accounts/"+testUserID+"/bindings/email",
+		"",
+		token,
+	), http.StatusNoContent)
 	if f.auth.deletedBinding != testUserID+"/email" {
 		t.Fatalf("deleted binding = %q", f.auth.deletedBinding)
 	}
-	requireStatus(t, f.request(http.MethodDelete,
-		"/authkit/admin/api/accounts/"+testUserID+"/sessions/"+testUserID, "", token), http.StatusNoContent)
+	requireStatus(t, f.request(
+		http.MethodDelete,
+		"/authkit/admin/api/accounts/"+testUserID+"/sessions/"+testUserID,
+		"",
+		token,
+	), http.StatusNoContent)
 	if f.auth.revokedSession != testUserID+"/"+testUserID {
 		t.Fatalf("revoked session = %q", f.auth.revokedSession)
 	}
-	requireStatus(t, f.request(http.MethodPost,
-		"/authkit/admin/api/accounts/"+testUserID+"/sessions/revoke", "", token), http.StatusNoContent)
+	requireStatus(t, f.request(
+		http.MethodPost,
+		"/authkit/admin/api/accounts/"+testUserID+"/sessions/revoke",
+		"",
+		token,
+	), http.StatusNoContent)
 	if f.auth.revokedAll != testUserID {
 		t.Fatalf("revoked all sessions for = %q", f.auth.revokedAll)
 	}
@@ -547,27 +651,81 @@ func TestAdminRejectsBadInputBeforeStorage(t *testing.T) {
 		token  string
 	}{
 		{http.MethodPost, "/authkit/admin/api/codes", `{"email":"invalid"}`, ""},
-		{http.MethodPost, "/authkit/admin/api/codes", `{"email":"admin@example.com","extra":true}`, ""},
-		{http.MethodPost, "/authkit/admin/api/login", `{"email":"admin@example.com","code":""}`, ""},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/codes",
+			`{"email":"admin@example.com","extra":true}`,
+			"",
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/login",
+			`{"email":"admin@example.com","code":""}`,
+			"",
+		},
 		{http.MethodGet, "/authkit/admin/api/accounts?page=0", "", token},
 		{http.MethodGet, "/authkit/admin/api/accounts?limit=101", "", token},
 		{http.MethodGet, "/authkit/admin/api/accounts/bad-id", "", token},
-		{http.MethodDelete, "/authkit/admin/api/accounts/" + testUserID + "/bindings/other", "", token},
-		{http.MethodDelete, "/authkit/admin/api/accounts/" + testUserID + "/sessions/bad-id", "", token},
+		{
+			http.MethodDelete,
+			"/authkit/admin/api/accounts/" + testUserID + "/bindings/other",
+			"",
+			token,
+		},
+		{
+			http.MethodDelete,
+			"/authkit/admin/api/accounts/" + testUserID + "/sessions/bad-id",
+			"",
+			token,
+		},
 		{http.MethodPost, "/authkit/admin/api/accounts/bad-id/sessions/revoke", "", token},
 		{http.MethodGet, "/authkit/admin/api/blacklist?page=0", "", token},
 		{http.MethodGet, "/authkit/admin/api/blacklist?limit=101", "", token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"other","identifier":"user@example.com"}`, token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"email","identifier":"invalid"}`, token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"email","identifier":"user@example.com","extra":true}`, token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"wechat","identifier":""}`, token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"wechat","identifier":" "}`, token},
-		{http.MethodPost, "/authkit/admin/api/blacklist", `{"method":"wechat","identifier":"` + strings.Repeat("a", 129) + `"}`, token},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"other","identifier":"user@example.com"}`,
+			token,
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"email","identifier":"invalid"}`,
+			token,
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"email","identifier":"user@example.com","extra":true}`,
+			token,
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"wechat","identifier":""}`,
+			token,
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"wechat","identifier":" "}`,
+			token,
+		},
+		{
+			http.MethodPost,
+			"/authkit/admin/api/blacklist",
+			`{"method":"wechat","identifier":"` + strings.Repeat("a", 129) + `"}`,
+			token,
+		},
 		{http.MethodDelete, "/authkit/admin/api/blacklist/bad-id", "", token},
 	}
 	for _, request := range requests {
 		t.Run(request.method+" "+request.path, func(t *testing.T) {
-			requireStatus(t, f.request(request.method, request.path, request.body, request.token), http.StatusBadRequest)
+			requireStatus(
+				t,
+				f.request(request.method, request.path, request.body, request.token),
+				http.StatusBadRequest,
+			)
 		})
 	}
 	if f.mail.sent != 1 {
@@ -586,7 +744,11 @@ func TestAdminManagesBlacklist(t *testing.T) {
 		`{"method":"email","identifier":"unregistered@example.com"}`,
 		`{"method":"wechat","identifier":"RawOpenID"}`,
 	} {
-		requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/blacklist", body, token), http.StatusNoContent)
+		requireStatus(
+			t,
+			f.request(http.MethodPost, "/authkit/admin/api/blacklist", body, token),
+			http.StatusNoContent,
+		)
 	}
 	response := f.request(http.MethodGet, "/authkit/admin/api/blacklist?page=1&limit=2", "", token)
 	requireStatus(t, response, http.StatusOK)
@@ -617,12 +779,24 @@ func TestAdminManagesBlacklist(t *testing.T) {
 	if emailID == "" || wechatID == "" {
 		t.Fatalf("missing normalized email or wechat entry: %+v", result.Items)
 	}
-	requireStatus(t, f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+emailID, "", token), http.StatusNoContent)
-	requireStatus(t, f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+wechatID, "", token), http.StatusNoContent)
+	requireStatus(
+		t,
+		f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+emailID, "", token),
+		http.StatusNoContent,
+	)
+	requireStatus(
+		t,
+		f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+wechatID, "", token),
+		http.StatusNoContent,
+	)
 	if len(f.auth.blacklist) != 1 {
 		t.Fatalf("remaining blacklist entries = %d", len(f.auth.blacklist))
 	}
-	requireStatus(t, f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+emailID, "", token), http.StatusNoContent)
+	requireStatus(
+		t,
+		f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+emailID, "", token),
+		http.StatusNoContent,
+	)
 }
 
 func TestAdminCannotBlacklistOwnCredentials(t *testing.T) {
@@ -676,17 +850,27 @@ func TestAdminManagesPasswordBlacklist(t *testing.T) {
 	token := f.login(t, "admin@example.com")
 	requireStatus(t, f.request(http.MethodPost, "/authkit/admin/api/blacklist",
 		`{"method":"password","identifier":" user "}`, token), http.StatusNoContent)
-	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", userToken), http.StatusUnauthorized)
+	requireStatus(
+		t,
+		f.request(http.MethodGet, "/authkit/admin/api/me", "", userToken),
+		http.StatusUnauthorized,
+	)
 	response := f.request(http.MethodGet, "/authkit/admin/api/blacklist", "", token)
 	requireStatus(t, response, http.StatusOK)
 	var result authkit.BlacklistPage
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Total != 1 || len(result.Items) != 1 || result.Items[0].Method != authkit.MethodPassword || result.Items[0].Identifier != "user" {
+	if result.Total != 1 || len(result.Items) != 1 ||
+		result.Items[0].Method != authkit.MethodPassword ||
+		result.Items[0].Identifier != "user" {
 		t.Fatalf("password blacklist = %+v", result)
 	}
-	requireStatus(t, f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+result.Items[0].ID, "", token), http.StatusNoContent)
+	requireStatus(
+		t,
+		f.request(http.MethodDelete, "/authkit/admin/api/blacklist/"+result.Items[0].ID, "", token),
+		http.StatusNoContent,
+	)
 	if len(f.auth.blacklist) != 0 {
 		t.Fatal("password blacklist entry was not removed")
 	}
@@ -726,12 +910,17 @@ type handlerAuthStore struct {
 	revokedAll          string
 }
 
-func (s *handlerAuthStore) WithTransaction(ctx context.Context, fn func(authkit.Repositories) error) error {
+func (s *handlerAuthStore) WithTransaction(
+	ctx context.Context,
+	fn func(authkit.Repositories) error,
+) error {
 	return fn(s)
 }
+
 func (s *handlerAuthStore) Accounts() authkit.AccountRepository {
 	return handlerAccounts{AccountRepository: nil, store: s}
 }
+
 func (s *handlerAuthStore) Challenges() authkit.ChallengeRepository {
 	return handlerChallenges{ChallengeRepository: nil, store: s}
 }
@@ -739,6 +928,7 @@ func (s *handlerAuthStore) Rates() authkit.RateRepository { return handlerRates{
 func (s *handlerAuthStore) Sessions() authkit.SessionRepository {
 	return handlerSessions{store: s}
 }
+
 func (s *handlerAuthStore) Blacklist() authkit.BlacklistRepository {
 	return handlerBlacklist{store: s}
 }
@@ -756,7 +946,10 @@ func (r handlerAccounts) GetByID(_ context.Context, id string) (*authkit.Account
 	return &account, nil
 }
 
-func (r handlerAccounts) GetByPasswordIdentifier(ctx context.Context, identifier string) (*authkit.Account, error) {
+func (r handlerAccounts) GetByPasswordIdentifier(
+	ctx context.Context,
+	identifier string,
+) (*authkit.Account, error) {
 	for id, existing := range r.store.passwordIdentifiers {
 		if existing == identifier {
 			return r.GetByID(ctx, id)
@@ -765,7 +958,10 @@ func (r handlerAccounts) GetByPasswordIdentifier(ctx context.Context, identifier
 	return nil, authkit.ErrNotFound
 }
 
-func (r handlerAccounts) GetPasswordIdentifier(_ context.Context, accountID string) (string, error) {
+func (r handlerAccounts) GetPasswordIdentifier(
+	_ context.Context,
+	accountID string,
+) (string, error) {
 	identifier, ok := r.store.passwordIdentifiers[accountID]
 	if !ok {
 		return "", authkit.ErrNotFound
@@ -781,7 +977,10 @@ func (r handlerAccounts) GetPasswordHash(_ context.Context, accountID string) (s
 	return hash, nil
 }
 
-func (r handlerAccounts) SetPasswordHash(ctx context.Context, accountID, identifier, hash string) error {
+func (r handlerAccounts) SetPasswordHash(
+	ctx context.Context,
+	accountID, identifier, hash string,
+) error {
 	if _, err := r.GetByID(ctx, accountID); err != nil {
 		return err
 	}
@@ -834,18 +1033,30 @@ func (r handlerBlacklist) CheckAccount(ctx context.Context, id string) error {
 		return authkit.ErrNotFound
 	}
 	if account.Email != "" {
-		if err := r.Check(ctx, authkit.Credential{Method: authkit.MethodEmail, Identifier: account.Email}); err != nil {
+		if err := r.Check(
+			ctx,
+			authkit.Credential{Method: authkit.MethodEmail, Identifier: account.Email},
+		); err != nil {
 			return err
 		}
 	}
 	if _, ok := r.store.passwords[id]; ok {
-		if err := r.Check(ctx, authkit.Credential{Method: authkit.MethodPassword, Identifier: r.store.passwordIdentifiers[id]}); err != nil {
+		if err := r.Check(
+			ctx,
+			authkit.Credential{
+				Method:     authkit.MethodPassword,
+				Identifier: r.store.passwordIdentifiers[id],
+			},
+		); err != nil {
 			return err
 		}
 	}
 	for hash, accountID := range r.store.wechatIDs {
 		if accountID == id {
-			if err := r.Check(ctx, authkit.Credential{Method: authkit.MethodWechat, Identifier: hash}); err != nil {
+			if err := r.Check(
+				ctx,
+				authkit.Credential{Method: authkit.MethodWechat, Identifier: hash},
+			); err != nil {
 				return err
 			}
 		}
@@ -901,10 +1112,19 @@ func (r handlerBlacklist) List(_ context.Context, page, limit int) (authkit.Blac
 	total := int64(len(items))
 	start := min((page-1)*limit, len(items))
 	end := min(start+limit, len(items))
-	return authkit.BlacklistPage{Items: items[start:end], Total: total, Page: page, Limit: limit}, nil
+	return authkit.BlacklistPage{
+		Items: items[start:end],
+		Total: total,
+		Page:  page,
+		Limit: limit,
+	}, nil
 }
 
-func (r handlerAccounts) GetBySessionToken(_ context.Context, hash string, now time.Time) (*authkit.Account, error) {
+func (r handlerAccounts) GetBySessionToken(
+	_ context.Context,
+	hash string,
+	now time.Time,
+) (*authkit.Account, error) {
 	session, ok := r.store.sessions[hash]
 	if !ok || !now.Before(session.Expires) {
 		return nil, authkit.ErrNotFound
@@ -992,27 +1212,58 @@ func (m *handlerMail) SendCode(_ context.Context, email, code string) error {
 	return nil
 }
 
-func (s *handlerAuthStore) AdminOverview(_ context.Context, _ time.Time) (authkit.AdminOverview, error) {
+func (s *handlerAuthStore) AdminOverview(
+	_ context.Context,
+	_ time.Time,
+) (authkit.AdminOverview, error) {
 	return authkit.AdminOverview{Accounts: int64(len(s.accounts))}, nil
 }
 
-func (s *handlerAuthStore) AdminListAccounts(_ context.Context, _ string, page, limit int, _ time.Time) (authkit.AdminAccountPage, error) {
-	return authkit.AdminAccountPage{Items: []authkit.AdminAccountSummary{}, Total: int64(len(s.accounts)), Page: page, Limit: limit}, nil
+func (s *handlerAuthStore) AdminListAccounts(
+	_ context.Context,
+	_ string,
+	page, limit int,
+	_ time.Time,
+) (authkit.AdminAccountPage, error) {
+	return authkit.AdminAccountPage{
+		Items: []authkit.AdminAccountSummary{},
+		Total: int64(len(s.accounts)),
+		Page:  page,
+		Limit: limit,
+	}, nil
 }
 
-func (s *handlerAuthStore) AdminGetAccount(_ context.Context, id string, _ time.Time) (authkit.AdminAccountDetail, error) {
+func (s *handlerAuthStore) AdminGetAccount(
+	_ context.Context,
+	id string,
+	_ time.Time,
+) (authkit.AdminAccountDetail, error) {
 	account, ok := s.accounts[id]
 	if !ok {
 		return authkit.AdminAccountDetail{}, authkit.ErrNotFound
 	}
 	bindings := []authkit.AdminBindingInfo{}
 	if account.Email != "" {
-		bindings = append(bindings, authkit.AdminBindingInfo{Method: authkit.MethodEmail, Identifier: account.Email})
+		bindings = append(
+			bindings,
+			authkit.AdminBindingInfo{Method: authkit.MethodEmail, Identifier: account.Email},
+		)
 	}
 	if s.passwords[id] != "" {
-		bindings = append(bindings, authkit.AdminBindingInfo{Method: authkit.MethodPassword, Identifier: s.passwordIdentifiers[id]})
+		bindings = append(
+			bindings,
+			authkit.AdminBindingInfo{
+				Method:     authkit.MethodPassword,
+				Identifier: s.passwordIdentifiers[id],
+			},
+		)
 	}
-	return authkit.AdminAccountDetail{ID: account.ID, Username: account.Username, Email: account.Email, Bindings: bindings}, nil
+	return authkit.AdminAccountDetail{
+		ID:       account.ID,
+		Username: account.Username,
+		Email:    account.Email,
+		Bindings: bindings,
+	}, nil
 }
 
 func (s *handlerAuthStore) AdminDeleteBinding(ctx context.Context, id, method string) error {
@@ -1042,5 +1293,9 @@ func TestAdminRejectsDerivedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireStatus(t, f.request(http.MethodGet, "/authkit/admin/api/me", "", derived.Token), http.StatusForbidden)
+	requireStatus(
+		t,
+		f.request(http.MethodGet, "/authkit/admin/api/me", "", derived.Token),
+		http.StatusForbidden,
+	)
 }

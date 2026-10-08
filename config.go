@@ -21,7 +21,8 @@ func normalizeConfig(configs []Config) (Config, error) {
 	if len(configs) == 1 && configs[0].PasswordAlgorithm != "" {
 		config = configs[0]
 	}
-	if config.PasswordAlgorithm != PasswordAlgorithmArgon2id && config.PasswordAlgorithm != PasswordAlgorithmBcrypt {
+	if config.PasswordAlgorithm != PasswordAlgorithmArgon2id &&
+		config.PasswordAlgorithm != PasswordAlgorithmBcrypt {
 		return Config{}, ErrInvalidInput
 	}
 	return config, nil

@@ -38,7 +38,11 @@ type handler struct {
 }
 
 // NewHTTPHandler 返回可挂载到任意路径的控制台。宿主通过 ID 选择已有的超级管理员账号。
-func NewHTTPHandler(service *authkit.Service, adminAccountID string, configs ...Config) (http.Handler, error) {
+func NewHTTPHandler(
+	service *authkit.Service,
+	adminAccountID string,
+	configs ...Config,
+) (http.Handler, error) {
 	if service == nil || !validID(adminAccountID) || len(configs) > 1 {
 		return nil, authkit.ErrInvalidInput
 	}
@@ -83,15 +87,26 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) index(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().
+		Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data, _ := assets.ReadFile("assets/index.html")
 	escapedTitle := html.EscapeString(h.title)
-	data = bytes.Replace(data, []byte(`<meta name="authkit-title" content="AuthKit">`), []byte(`<meta name="authkit-title" content="`+escapedTitle+`">`), 1)
-	data = bytes.Replace(data, []byte("<title>AuthKit 超管后台</title>"), []byte("<title>"+escapedTitle+" 超管后台</title>"), 1)
+	data = bytes.Replace(
+		data,
+		[]byte(`<meta name="authkit-title" content="AuthKit">`),
+		[]byte(`<meta name="authkit-title" content="`+escapedTitle+`">`),
+		1,
+	)
+	data = bytes.Replace(
+		data,
+		[]byte("<title>AuthKit 超管后台</title>"),
+		[]byte("<title>"+escapedTitle+" 超管后台</title>"),
+		1,
+	)
 	_, _ = w.Write(data)
 }
 
@@ -155,7 +170,8 @@ func (h *handler) sendCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	account, err := h.service.AdminAccountByEmail(r.Context(), email)
-	if errors.Is(err, authkit.ErrNotFound) || err == nil && (account == nil || account.ID != h.adminID) {
+	if errors.Is(err, authkit.ErrNotFound) ||
+		err == nil && (account == nil || account.ID != h.adminID) {
 		// 不暴露哪个邮箱属于管理员账号。
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -165,7 +181,10 @@ func (h *handler) sendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.service.SendCode(r.Context(), authkit.SendCodeInput{Email: email, IP: clientIP(r)}); err != nil {
+	if err := h.service.SendCode(
+		r.Context(),
+		authkit.SendCodeInput{Email: email, IP: clientIP(r)},
+	); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -184,7 +203,8 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account, err := h.service.AdminAccountByEmail(r.Context(), email)
-	if errors.Is(err, authkit.ErrNotFound) || err == nil && (account == nil || account.ID != h.adminID) {
+	if errors.Is(err, authkit.ErrNotFound) ||
+		err == nil && (account == nil || account.ID != h.adminID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
@@ -192,7 +212,10 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	result, err := h.service.LoginEmail(r.Context(), authkit.EmailLoginInput{Email: email, Code: body.Code})
+	result, err := h.service.LoginEmail(
+		r.Context(),
+		authkit.EmailLoginInput{Email: email, Code: body.Code},
+	)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -229,7 +252,9 @@ func (h *handler) loginPassword(w http.ResponseWriter, r *http.Request) {
 	}{Token: result.Token, Account: accountFrom(&result.Account)})
 }
 
-func (h *handler) withAdmin(next func(http.ResponseWriter, *http.Request, *authkit.Account, string)) http.HandlerFunc {
+func (h *handler) withAdmin(
+	next func(http.ResponseWriter, *http.Request, *authkit.Account, string),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
@@ -313,7 +338,12 @@ func (h *handler) blacklist(w http.ResponseWriter, r *http.Request, _ *authkit.A
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *handler) addBlacklist(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+func (h *handler) addBlacklist(
+	w http.ResponseWriter,
+	r *http.Request,
+	_ *authkit.Account,
+	_ string,
+) {
 	var body blacklistRequest
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
@@ -327,7 +357,12 @@ func (h *handler) addBlacklist(w http.ResponseWriter, r *http.Request, _ *authki
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *handler) removeBlacklist(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+func (h *handler) removeBlacklist(
+	w http.ResponseWriter,
+	r *http.Request,
+	_ *authkit.Account,
+	_ string,
+) {
 	id := r.PathValue("id")
 	if !validID(id) {
 		writeError(w, authkit.ErrInvalidInput)
@@ -354,9 +389,16 @@ func (h *handler) account(w http.ResponseWriter, r *http.Request, _ *authkit.Acc
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *handler) deleteBinding(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+func (h *handler) deleteBinding(
+	w http.ResponseWriter,
+	r *http.Request,
+	_ *authkit.Account,
+	_ string,
+) {
 	id, method := r.PathValue("id"), r.PathValue("method")
-	if !validID(id) || method != authkit.MethodEmail && method != authkit.MethodWechat && method != authkit.MethodPassword {
+	if !validID(id) ||
+		method != authkit.MethodEmail && method != authkit.MethodWechat &&
+			method != authkit.MethodPassword {
 		writeError(w, authkit.ErrInvalidInput)
 		return
 	}
@@ -371,7 +413,12 @@ func (h *handler) deleteBinding(w http.ResponseWriter, r *http.Request, _ *authk
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *handler) revokeSession(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+func (h *handler) revokeSession(
+	w http.ResponseWriter,
+	r *http.Request,
+	_ *authkit.Account,
+	_ string,
+) {
 	id, sessionID := r.PathValue("id"), r.PathValue("sessionID")
 	if !validID(id) || !validID(sessionID) {
 		writeError(w, authkit.ErrInvalidInput)
@@ -384,7 +431,12 @@ func (h *handler) revokeSession(w http.ResponseWriter, r *http.Request, _ *authk
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *handler) revokeAllSessions(w http.ResponseWriter, r *http.Request, _ *authkit.Account, _ string) {
+func (h *handler) revokeAllSessions(
+	w http.ResponseWriter,
+	r *http.Request,
+	_ *authkit.Account,
+	_ string,
+) {
 	id := r.PathValue("id")
 	if !validID(id) {
 		writeError(w, authkit.ErrInvalidInput)

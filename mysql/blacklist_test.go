@@ -113,8 +113,14 @@ func TestBlacklistServiceLifecycle(t *testing.T) {
 			f := newMySQLFixture(t)
 			ctx := context.Background()
 			mail := &blacklistMail{}
-			service, err := authkit.NewService(f.store, mail, blacklistWechat{openID: credential.Identifier},
-				authkit.RegistrationPolicyFunc(func(context.Context, authkit.Registration) error { return nil }))
+			service, err := authkit.NewService(
+				f.store,
+				mail,
+				blacklistWechat{openID: credential.Identifier},
+				authkit.RegistrationPolicyFunc(
+					func(context.Context, authkit.Registration) error { return nil },
+				),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -132,30 +138,52 @@ func TestBlacklistServiceLifecycle(t *testing.T) {
 					return service.LoginWechat(ctx, "wechat-login-code")
 				}
 				if sendCode {
-					if err := service.SendCode(ctx, authkit.SendCodeInput{Email: credential.Identifier, IP: "192.0.2.1"}); err != nil {
+					if err := service.SendCode(
+						ctx,
+						authkit.SendCodeInput{Email: credential.Identifier, IP: "192.0.2.1"},
+					); err != nil {
 						return nil, err
 					}
 				}
-				return service.LoginEmail(ctx, authkit.EmailLoginInput{Email: credential.Identifier, Code: mail.code})
+				return service.LoginEmail(
+					ctx,
+					authkit.EmailLoginInput{Email: credential.Identifier, Code: mail.code},
+				)
 			}
 			first, err := login(true)
 			if err != nil || !first.Created {
 				t.Fatalf("initial registration = %+v, %v", first, err)
 			}
-			if account, err := service.Authenticate(ctx, first.Token); err != nil || account.ID != first.Account.ID {
+			if account, err := service.Authenticate(
+				ctx,
+				first.Token,
+			); err != nil ||
+				account.ID != first.Account.ID {
 				t.Fatalf("initial authenticate = %+v, %v", account, err)
 			}
 			if err := service.AddBlacklist(ctx, credential); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Authenticate(ctx, first.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+			if _, err := service.Authenticate(
+				ctx,
+				first.Token,
+			); !errors.Is(
+				err,
+				authkit.ErrUnauthorized,
+			) {
 				t.Fatalf("blocked token = %v", err)
 			}
 			if _, err := login(false); !errors.Is(err, authkit.ErrBlacklisted) {
 				t.Fatalf("blocked login = %v", err)
 			}
 			if credential.Method == authkit.MethodEmail {
-				if err := service.SendCode(ctx, authkit.SendCodeInput{Email: credential.Identifier}); !errors.Is(err, authkit.ErrBlacklisted) {
+				if err := service.SendCode(
+					ctx,
+					authkit.SendCodeInput{Email: credential.Identifier},
+				); !errors.Is(
+					err,
+					authkit.ErrBlacklisted,
+				) {
 					t.Fatalf("blocked code delivery = %v", err)
 				}
 			}
@@ -163,7 +191,8 @@ func TestBlacklistServiceLifecycle(t *testing.T) {
 			if err != nil || page.Total != 1 || len(page.Items) != 1 {
 				t.Fatalf("service list = %+v, %v", page, err)
 			}
-			if credential.Method == authkit.MethodEmail && page.Items[0].Identifier != "user@example.com" {
+			if credential.Method == authkit.MethodEmail &&
+				page.Items[0].Identifier != "user@example.com" {
 				t.Fatalf("stored email = %q", page.Items[0].Identifier)
 			}
 			if credential.Method == authkit.MethodWechat && page.Items[0].Identifier != "" {
@@ -172,14 +201,25 @@ func TestBlacklistServiceLifecycle(t *testing.T) {
 			if err := service.RemoveBlacklist(ctx, page.Items[0].ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Authenticate(ctx, first.Token); !errors.Is(err, authkit.ErrUnauthorized) {
+			if _, err := service.Authenticate(
+				ctx,
+				first.Token,
+			); !errors.Is(
+				err,
+				authkit.ErrUnauthorized,
+			) {
 				t.Fatalf("old token after removal = %v", err)
 			}
 			second, err := login(true)
-			if err != nil || second.Created || second.Account.ID != first.Account.ID || second.Token == first.Token {
+			if err != nil || second.Created || second.Account.ID != first.Account.ID ||
+				second.Token == first.Token {
 				t.Fatalf("login after removal = %+v, %v", second, err)
 			}
-			if account, err := service.Authenticate(ctx, second.Token); err != nil || account.ID != first.Account.ID {
+			if account, err := service.Authenticate(
+				ctx,
+				second.Token,
+			); err != nil ||
+				account.ID != first.Account.ID {
 				t.Fatalf("new token after removal = %+v, %v", account, err)
 			}
 		})
@@ -205,12 +245,21 @@ func TestBlacklistPersistsCleanupAndRemoval(t *testing.T) {
 				if err := repos.Accounts().Create(ctx, &account, credential); err != nil {
 					return err
 				}
-				return repos.Sessions().Create(ctx, &authkit.Session{Hash: "session", AccountID: account.ID, Expires: now.Add(time.Hour)})
+				return repos.Sessions().
+					Create(ctx, &authkit.Session{Hash: "session", AccountID: account.ID, Expires: now.Add(time.Hour)})
 			}); err != nil {
 				t.Fatal(err)
 			}
 			if method == authkit.MethodEmail {
-				if err := f.db.Create(&models.Challenge{Email: credential.Identifier, Hash: "code", Sent: now, Expires: now.Add(time.Minute), Ready: true}).Error; err != nil {
+				if err := f.db.Create(
+					&models.Challenge{
+						Email:   credential.Identifier,
+						Hash:    "code",
+						Sent:    now,
+						Expires: now.Add(time.Minute),
+						Ready:   true,
+					},
+				).Error; err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -233,11 +282,16 @@ func TestBlacklistPersistsCleanupAndRemoval(t *testing.T) {
 			if !errors.Is(err, authkit.ErrBlacklisted) {
 				t.Fatalf("blocked credential check = %v", err)
 			}
-			if err := f.store.Blacklist().CheckAccount(ctx, account.ID); !errors.Is(err, authkit.ErrBlacklisted) {
+			if err := f.store.Blacklist().
+				CheckAccount(ctx, account.ID); !errors.Is(
+				err,
+				authkit.ErrBlacklisted,
+			) {
 				t.Fatalf("blocked account check = %v", err)
 			}
 			page, err = f.store.Blacklist().List(ctx, 1, 10)
-			if err != nil || page.Total != 1 || len(page.Items) != 1 || !page.Items[0].CreatedAt.Equal(now) {
+			if err != nil || page.Total != 1 || len(page.Items) != 1 ||
+				!page.Items[0].CreatedAt.Equal(now) {
 				t.Fatalf("blocked list = %+v, %v", page, err)
 			}
 			if method == authkit.MethodWechat && page.Items[0].Identifier != "" {
@@ -296,7 +350,8 @@ func TestBlacklistRollbackAndPagination(t *testing.T) {
 	var lastID string
 	for pageNumber := 1; pageNumber <= len(credentials); pageNumber++ {
 		page, err := f.store.Blacklist().List(ctx, pageNumber, 1)
-		if err != nil || page.Total != 3 || len(page.Items) != 1 || page.Page != pageNumber || page.Limit != 1 {
+		if err != nil || page.Total != 3 || len(page.Items) != 1 || page.Page != pageNumber ||
+			page.Limit != 1 {
 			t.Fatalf("page %d = %+v, %v", pageNumber, page, err)
 		}
 		if page.Items[0].ID <= lastID {
@@ -305,7 +360,11 @@ func TestBlacklistRollbackAndPagination(t *testing.T) {
 		lastID = page.Items[0].ID
 	}
 	for _, input := range [][2]int{{0, 1}, {1, 0}, {int(^uint(0) >> 1), 2}} {
-		if _, err := f.store.Blacklist().List(ctx, input[0], input[1]); !errors.Is(err, authkit.ErrInvalidInput) {
+		if _, err := f.store.Blacklist().
+			List(ctx, input[0], input[1]); !errors.Is(
+			err,
+			authkit.ErrInvalidInput,
+		) {
 			t.Fatalf("invalid pagination %v = %v", input, err)
 		}
 	}
@@ -318,7 +377,10 @@ func TestBlacklistSerializesSessionIssuance(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			now := time.Now().UTC().Truncate(time.Microsecond)
-			blocked := authkit.Credential{Method: authkit.MethodEmail, Identifier: "user@example.com"}
+			blocked := authkit.Credential{
+				Method:     authkit.MethodEmail,
+				Identifier: "user@example.com",
+			}
 			login := blocked
 			account := authkit.Account{ID: "account"}
 			if err := f.store.WithTransaction(ctx, func(repos authkit.Repositories) error {
@@ -327,8 +389,17 @@ func TestBlacklistSerializesSessionIssuance(t *testing.T) {
 				t.Fatal(err)
 			}
 			if sibling {
-				login = authkit.Credential{Method: authkit.MethodWechat, Identifier: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-				if err := f.db.Create(&models.Binding{Method: login.Method, Identifier: login.Identifier, AccountID: &account.ID}).Error; err != nil {
+				login = authkit.Credential{
+					Method:     authkit.MethodWechat,
+					Identifier: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				}
+				if err := f.db.Create(
+					&models.Binding{
+						Method:     login.Method,
+						Identifier: login.Identifier,
+						AccountID:  &account.ID,
+					},
+				).Error; err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -372,7 +443,10 @@ func TestBlacklistSerializesSessionIssuance(t *testing.T) {
 			select {
 			case err := <-addDone:
 				close(release)
-				t.Fatalf("blacklist add completed before session transaction released its lock: %v", err)
+				t.Fatalf(
+					"blacklist add completed before session transaction released its lock: %v",
+					err,
+				)
 			case <-time.After(100 * time.Millisecond):
 			}
 			close(release)
@@ -409,7 +483,11 @@ func TestBlacklistDoesNotDeadlockBindingRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := f.db.Create(&models.Challenge{
-		Email: credential.Identifier, Hash: "code", Sent: now, Expires: now.Add(time.Minute), Ready: true,
+		Email:   credential.Identifier,
+		Hash:    "code",
+		Sent:    now,
+		Expires: now.Add(time.Minute),
+		Ready:   true,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}

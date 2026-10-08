@@ -239,6 +239,10 @@ mux.Handle("/ops/", http.StripPrefix("/ops", adminHandler))
 
 默认 Schema 包含 `auth_accounts`、`auth_bindings`、`auth_challenges`、`auth_rates`、`auth_sessions`、`auth_blacklist`。账号保存 ID 和可选且非唯一的展示名 `username`。密码、邮箱和微信 OpenID 都记在 `auth_bindings` 里，用 `method` 区分；密码绑定以密码登录标识为 `identifier`，摘要写入可空 `password_hash` 列。升级密码登录功能前，宿主须执行 `db.AutoMigrate(authmysql.Models()...)`；已有账号不会自动获得密码。
 
+全部内置模型包含 `CreatedAt` / `UpdatedAt`，对应 `datetime(6)` 精度的 `created_at` / `updated_at` 列。GORM 在创建时自动填充零值时间字段，实际更新时自动维护 `UpdatedAt`；仅用于取得排他锁的自更新不改变时间。`Blacklist.CreatedAt` 保留最近一次加入黑名单的时间语义，重新拉黑时仍会覆盖。时间由宿主 GORM 的 `NowFunc` 提供；黑名单加入时间仍由服务时钟提供。
+
+升级后需再次执行 `db.AutoMigrate(authmysql.Models()...)`，补齐时间列。新增时间列允许 `NULL`，旧记录的未知时间读取为 Go 零值，避免严格模式下迁移已有数据失败；如需历史时间，由宿主根据已有业务记录回填。
+
 本次展示名与登录标识分离会变更公开输入结构和仓储接口，宿主须更新调用：`CreatePasswordAccountInput.Identifier` 必填，`Username` 仅为可选展示名；`SetPasswordInput.Username` 替换为 `Identifier`。保留现有 `auth_bindings.identifier`，无需与展示名同步。旧库中的 `auth_accounts.username` 唯一索引需由宿主显式移除，`AutoMigrate` 通常不会删除已有唯一索引。先确认实际索引名并按宿主备份规范执行，例如原索引名为 `username` 时：
 
 ```go
