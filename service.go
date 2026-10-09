@@ -16,6 +16,7 @@ type Service struct {
 	registration      RegistrationPolicy
 	now               func() time.Time
 	passwordAlgorithm PasswordAlgorithm
+	sessionTTL        time.Duration
 }
 
 // NewService 校验存储依赖。CodeSender 或 WechatExchanger 为 nil 时关闭对应渠道；RegistrationPolicy 为 nil 时拒绝创建账号，但允许登录。
@@ -40,6 +41,7 @@ func NewService(
 		registration:      registration,
 		now:               time.Now,
 		passwordAlgorithm: config.PasswordAlgorithm,
+		sessionTTL:        config.SessionTTL,
 	}, nil
 }
 
@@ -51,6 +53,7 @@ func (s *Service) InTransaction(repos Repositories, policy RegistrationPolicy) *
 		registration:      policy,
 		now:               s.now,
 		passwordAlgorithm: s.passwordAlgorithm,
+		sessionTTL:        s.sessionTTL,
 	}
 }
 

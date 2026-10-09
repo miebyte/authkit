@@ -8,6 +8,7 @@ const (
 	CodeTTL        = 10 * time.Minute
 	ResendInterval = time.Minute
 	MaxAttempts    = 5
+	// SessionTTL 是未配置会话有效时长时使用的默认值。
 	SessionTTL     = 30 * 24 * time.Hour
 	EmailRateLimit = 10
 	IPRateLimit    = 30

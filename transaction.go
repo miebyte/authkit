@@ -15,6 +15,7 @@ type Transaction struct {
 	registration      RegistrationPolicy
 	now               func() time.Time
 	passwordAlgorithm PasswordAlgorithm
+	sessionTTL        time.Duration
 }
 
 // codeLogin 表示一次验证码登录，与投递渠道无关。
@@ -426,7 +427,7 @@ func (t *Transaction) finishLogin(
 			return Outcome{}, err
 		}
 	}
-	login, err := t.createSession(ctx, account, method, "", now.Add(SessionTTL), created)
+	login, err := t.createSession(ctx, account, method, "", now.Add(t.sessionTTL), created)
 	return Outcome{Login: login}, err
 }
 
@@ -488,7 +489,7 @@ func (t *Transaction) LoginAs(
 	if err := t.repos.Blacklist().CheckAccount(ctx, account.ID); err != nil {
 		return nil, err
 	}
-	expires := now.Add(SessionTTL)
+	expires := now.Add(t.sessionTTL)
 	if parent.Expires.Before(expires) {
 		expires = parent.Expires
 	}

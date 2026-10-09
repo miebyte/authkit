@@ -114,6 +114,16 @@ bcrypt 配置只验证 bcrypt 摘要，支持 `$2a$`、`$2b$`、`$2y$` 且 cost 
 
 ### 邮箱登录与会话
 
+通过创建服务时的 `Config.SessionTTL` 设置会话有效时长，类型为 `time.Duration`，例如 7 天：
+
+```go
+service, err := authkit.NewService(store, sender, exchanger, policy,
+    authkit.Config{SessionTTL: 7 * 24 * time.Hour},
+)
+```
+
+不传配置或 `SessionTTL` 为 `0` 时使用默认 30 天；负值返回 `ErrInvalidInput`。可以与 `PasswordAlgorithm` 在同一个配置中设置。该时长适用于密码、邮箱和微信登录，以及 `InTransaction` 中的新会话；代登录有效期取配置时长与父会话剩余时长的较小值。修改配置只影响新签发的会话，已有会话保留原到期时间。导出的 `authkit.SessionTTL` 常量仍表示默认 30 天。
+
 以下是发送验证码、登录和已登录请求中的关键调用；错误处理与 HTTP 响应由宿主完成。
 
 ```go
@@ -192,7 +202,7 @@ if err == nil && len(entries.Items) > 0 {
 - 60 秒内不能向同一邮箱重发。自首次请求起的固定一小时窗口内，每邮箱最多发送 10 次、每 IP 最多 30 次。
 - 验证码先保存为不可用状态；邮件发送成功后才激活。投递失败的验证码不能登录，但发码次数与重发冷却仍保留。
 - 微信只把 OpenID 当作登录凭证，入库前取摘要，不保存 AppID、UnionID 或 `session_key`。同一个 OpenID 只能绑定一个账号。
-- 会话有效期为 30 天，不自动续期；过期会话不能认证。过期数据的清理由宿主安排。
+- 会话有效期默认 30 天，可通过 `Config.SessionTTL` 设置，不自动续期；过期会话不能认证。过期数据的清理由宿主安排。
 
 错误可用 `errors.Is` 匹配。常见错误包括 `ErrInvalidEmail` / `ErrInvalidInput`、`ErrInvalidCredentials`、`ErrResendTooSoon` / `ErrTooManyRequests`、`ErrChallengeInvalid` / `ErrChallengeMismatch`、`ErrRegistrationDenied`、`ErrBlacklisted`、`ErrUnauthorized`、`ErrEmailUnavailable`、`ErrWechatCode` 和 `ErrWechatLogin`。建议将 `ErrInvalidCredentials` 映射为 HTTP 401，将 `ErrEmailUnavailable` 映射为 HTTP 503；完整示例见 [`examples/api/http.go`](examples/api/http.go)。错误全集见 [`errors.go`](errors.go)。
 

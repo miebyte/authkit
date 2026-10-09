@@ -9,7 +9,7 @@ import (
 )
 
 func TestAuthenticateSessionReturnsLoginMethod(t *testing.T) {
-	f := newBlacklistFixture(t)
+	f := configuredPasswordFixture(t, Config{SessionTTL: 2 * time.Hour})
 	ctx := context.Background()
 	accountID := strings.Repeat("a", 64)
 	f.store.bind(accountID, "user@example.com", f.wechat.identity.OpenID)
@@ -34,7 +34,8 @@ func TestAuthenticateSessionReturnsLoginMethod(t *testing.T) {
 	for method, login := range logins {
 		t.Run(method, func(t *testing.T) {
 			stored := f.store.sessions[digest(login.Token)]
-			if stored.Method != method || stored.AccountID != accountID {
+			if stored.Method != method || stored.AccountID != accountID ||
+				!stored.Expires.Equal(f.now.Add(2*time.Hour)) || !login.Expires.Equal(stored.Expires) {
 				t.Fatalf("stored session = %+v, want method %q", stored, method)
 			}
 			for name, authenticate := range map[string]func(context.Context, string) (*AuthenticatedSession, error){
